@@ -135,6 +135,17 @@ typedef struct Context
     struct State *pst; // used by v8 thread
     VALUE procs;       // array of js -> ruby callbacks
     VALUE exception;   // pending exception or Qnil
+    // Per-instantiate resolver Proc, Qnil when none active.
+    // module_instantiate saves/restores via rb_ensure to keep the slot
+    // consistent across exceptions and nested compile_module + instantiate
+    // from inside the resolver block. Concurrent Module#instantiate calls
+    // on the same Context from different Ruby threads race on this slot;
+    // callers must serialize externally — the rest of mini_racer's Context
+    // API has the same single-threaded-per-Context expectation.
+    VALUE resolve_block;
+    // Callable for `import(...)` in JS, or Qnil to reject dynamic imports
+    // with a clear error. Set via Context#dynamic_import_resolver=.
+    VALUE dynamic_import_resolver;
     Buf req, res;      // ruby->v8 request/response, mediated by |mtx| and |cv|
     Buf snapshot;
     pthread_t single_threaded_thr;
@@ -157,6 +168,20 @@ typedef struct Context
 typedef struct Snapshot {
     VALUE blob;
 } Snapshot;
+
+// GC-finalizer caveat: module_free cannot send a dispose RPC (would need
+// to take rr_mtx without a reliable GVL guarantee). Handles freed here
+// rely on State::~State() walking st.modules at isolate teardown — so
+// long-lived Contexts with many short-lived Modules accumulate Persistents
+// until the Context is disposed. Call Module#dispose explicitly to free
+// eagerly.
+typedef struct Module {
+    VALUE   context;      // parent Context VALUE (kept alive via mark)
+    VALUE   cached_data;  // ASCII-8BIT String or Qnil
+    int32_t handle_id;    // 0 if uninitialized or already freed
+    int     cache_rejected;
+    int     disposed;
+} Module;
 
 // GC-finalizer caveat: script_free cannot send a dispose RPC (would need
 // to take rr_mtx without a reliable GVL guarantee). Handles freed here
@@ -212,6 +237,19 @@ static const rb_data_type_t script_type = {
     },
 };
 
+static void module_free(void *arg);
+static void module_mark(void *arg);
+static size_t module_size(const void *arg);
+
+static const rb_data_type_t module_type = {
+    .wrap_struct_name   =  "mini_racer/module",
+    .function           = {
+        .dfree = module_free,
+        .dmark = module_mark,
+        .dsize = module_size,
+    },
+};
+
 static VALUE platform_init_error;
 static VALUE context_disposed_error;
 static VALUE parse_error;
@@ -224,6 +262,7 @@ static VALUE terminated_error;
 static VALUE context_class;
 static VALUE snapshot_class;
 static VALUE script_class;
+static VALUE module_class;
 static VALUE date_time_class;
 static VALUE binary_class;
 static VALUE js_function_class;
@@ -843,13 +882,19 @@ static void dispatch1(Context *c, const uint8_t *p, size_t n)
     case 'D': return v8_dispose_script(c->pst, p+1, n-1);
     case 'E': return v8_timedwait(c, p+1, n-1, v8_eval);
     case 'H': return v8_heap_snapshot(c->pst);
+    case 'I': return v8_timedwait(c, p+1, n-1, v8_instantiate_module); // (I)nstantiate module
     case 'K': return v8_timedwait(c, p+1, n-1, v8_compile); // (K)ompile — 'C' is taken
     case 'M': return v8_perform_microtask_checkpoint(c->pst);
+    case 'N': return v8_module_namespace(c->pst, p+1, n-1);  // (N)amespace
+    case 'O': return v8_timedwait(c, p+1, n-1, v8_compile_module); // (O)bject-module compile
     case 'P': return v8_pump_message_loop(c->pst);
     case 'R': return v8_timedwait(c, p+1, n-1, v8_run);
     case 'S': return v8_heap_stats(c->pst);
     case 'T': return v8_snapshot(c->pst, p+1, n-1);
+    case 'U': return v8_module_status(c->pst, p+1, n-1);    // (U) module status — non-blocking
+    case 'V': return v8_timedwait(c, p+1, n-1, v8_evaluate_module); // e(V)aluate
     case 'W': return v8_warmup(c->pst, p+1, n-1);
+    case 'Z': return v8_dispose_module(c->pst, p+1, n-1);   // (Z) dispose module handle
     case 'L':
         b = 0;
         v8_reply(c, &b, 1); // doesn't matter what as long as it's not empty
@@ -1023,6 +1068,165 @@ fail:
     goto out;
 }
 
+// called with |rr_mtx| and GVL held; can raise exception
+static VALUE rendezvous_resolve_do(VALUE arg)
+{
+    struct rendezvous_nogvl *a;
+    VALUE args, specifier, referrer_url, ret;
+    Context *c;
+    Module *m;
+    DesCtx d;
+    Buf *b;
+
+    a = (void *)arg;
+    b = a->res;
+    c = a->context;
+    assert(b->len > 0);
+    assert(*b->buf == 'm');
+    DesCtx_init(&d);
+    args = deserialize1(&d, b->buf+1, b->len-1); // skip 'm' marker
+    // args: [specifier, referrer_url]
+    specifier    = rb_ary_entry(args, 0);
+    referrer_url = rb_ary_entry(args, 1);
+    if (NIL_P(c->resolve_block))
+        rb_raise(runtime_error, "module resolver requested but no resolver block is active");
+    ret = rb_funcall(c->resolve_block, rb_intern("call"), 2, specifier, referrer_url);
+    if (!rb_obj_is_kind_of(ret, module_class))
+        rb_raise(runtime_error, "module resolver must return a MiniRacer::Module, got %s",
+                 rb_obj_classname(ret));
+    TypedData_Get_Struct(ret, Module, &module_type, m);
+    if (m->disposed)
+        rb_raise(runtime_error, "module resolver returned a disposed Module");
+    // Reject cross-Context modules explicitly: handle ids restart at 1
+    // per Context, so without this check a foreign Module silently maps
+    // to whichever local module happens to share its id.
+    {
+        Context *mc;
+        TypedData_Get_Struct(m->context, Context, &context_type, mc);
+        if (mc != c)
+            rb_raise(runtime_error,
+                     "module resolver returned a Module from a different Context");
+    }
+    return INT2FIX(m->handle_id);
+}
+
+// called with |rr_mtx| and GVL held; |mtx| is unlocked
+// resolver data is in |a->res|, serialized handle id goes in |a->req|
+static void *rendezvous_resolve(void *arg)
+{
+    struct rendezvous_nogvl *a;
+    const char *err;
+    Context *c;
+    int exc;
+    VALUE r;
+    Ser s;
+
+    a = arg;
+    c = a->context;
+    r = rb_protect(rendezvous_resolve_do, (VALUE)a, &exc);
+    if (exc) {
+        c->exception = rb_errinfo();
+        rb_set_errinfo(Qnil);
+        goto fail;
+    }
+    ser_init1(&s, 'm'); // resolve reply (matches request marker)
+    if (serialize(&s, r)) { // should not happen
+        c->exception = rb_exc_new_cstr(internal_error, s.err);
+        ser_reset(&s);
+        goto fail;
+    }
+out:
+    buf_move(&s.b, a->req);
+    return NULL;
+fail:
+    ser_init0(&s);
+    w_byte(&s, 'e');
+    r = rb_funcall(c->exception, rb_intern("to_s"), 0);
+    err = StringValueCStr(r);
+    if (err)
+        w(&s, err, strlen(err));
+    goto out;
+}
+
+// called with |rr_mtx| and GVL held; can raise exception
+static VALUE rendezvous_dynamic_import_do(VALUE arg)
+{
+    struct rendezvous_nogvl *a;
+    VALUE args, specifier, referrer_url, ret;
+    Context *c;
+    Module *m;
+    DesCtx d;
+    Buf *b;
+
+    a = (void *)arg;
+    b = a->res;
+    c = a->context;
+    assert(b->len > 0);
+    assert(*b->buf == 'd');
+    DesCtx_init(&d);
+    args = deserialize1(&d, b->buf+1, b->len-1); // skip 'd' marker
+    specifier    = rb_ary_entry(args, 0);
+    referrer_url = rb_ary_entry(args, 1);
+    if (NIL_P(c->dynamic_import_resolver))
+        rb_raise(runtime_error,
+                 "import() called but Context#dynamic_import_resolver is not set");
+    ret = rb_funcall(c->dynamic_import_resolver, rb_intern("call"), 2,
+                     specifier, referrer_url);
+    if (!rb_obj_is_kind_of(ret, module_class))
+        rb_raise(runtime_error,
+                 "dynamic import resolver must return a MiniRacer::Module, got %s",
+                 rb_obj_classname(ret));
+    TypedData_Get_Struct(ret, Module, &module_type, m);
+    if (m->disposed)
+        rb_raise(runtime_error, "dynamic import resolver returned a disposed Module");
+    {
+        Context *mc;
+        TypedData_Get_Struct(m->context, Context, &context_type, mc);
+        if (mc != c)
+            rb_raise(runtime_error,
+                     "dynamic import resolver returned a Module from a different Context");
+    }
+    return INT2FIX(m->handle_id);
+}
+
+// called with |rr_mtx| and GVL held; |mtx| is unlocked
+// request data is in |a->res|, serialized handle id goes in |a->req|
+static void *rendezvous_dynamic_import(void *arg)
+{
+    struct rendezvous_nogvl *a;
+    const char *err;
+    Context *c;
+    int exc;
+    VALUE r;
+    Ser s;
+
+    a = arg;
+    c = a->context;
+    r = rb_protect(rendezvous_dynamic_import_do, (VALUE)a, &exc);
+    if (exc) {
+        c->exception = rb_errinfo();
+        rb_set_errinfo(Qnil);
+        goto fail;
+    }
+    ser_init1(&s, 'd'); // dynamic import reply (matches request marker)
+    if (serialize(&s, r)) { // should not happen
+        c->exception = rb_exc_new_cstr(internal_error, s.err);
+        ser_reset(&s);
+        goto fail;
+    }
+out:
+    buf_move(&s.b, a->req);
+    return NULL;
+fail:
+    ser_init0(&s);
+    w_byte(&s, 'e');
+    r = rb_funcall(c->exception, rb_intern("to_s"), 0);
+    err = StringValueCStr(r);
+    if (err)
+        w(&s, err, strlen(err));
+    goto out;
+}
+
 static void *single_threaded_runner(void *arg)
 {
     Context *c;
@@ -1093,6 +1297,16 @@ next:
     }
     buf_move(&c->res, a->res);
     pthread_mutex_unlock(&c->mtx);
+    if (*a->res->buf == 'm') { // module resolver request?
+        rb_thread_call_with_gvl(rendezvous_resolve, a);
+        buf_reset(a->res);
+        goto next;
+    }
+    if (*a->res->buf == 'd') { // dynamic import() request?
+        rb_thread_call_with_gvl(rendezvous_dynamic_import, a);
+        buf_reset(a->res);
+        goto next;
+    }
     if (*a->res->buf == 'c') { // js -> ruby callback?
         rb_thread_call_with_gvl(rendezvous_callback, a);
         buf_reset(a->res);
@@ -1208,6 +1422,8 @@ static VALUE context_alloc(VALUE klass)
     c = ruby_xmalloc(sizeof(*c));
     memset(c, 0, sizeof(*c));
     c->exception = Qnil;
+    c->resolve_block = Qnil;
+    c->dynamic_import_resolver = Qnil;
     c->procs = rb_ary_new();
     buf_init(&c->snapshot);
     buf_init(&c->req);
@@ -1340,6 +1556,8 @@ static void context_mark(void *arg)
     c = arg;
     rb_gc_mark(c->procs);
     rb_gc_mark(c->exception);
+    rb_gc_mark(c->resolve_block);
+    rb_gc_mark(c->dynamic_import_resolver);
 }
 
 static size_t context_size(const void *arg)
@@ -2016,6 +2234,298 @@ static VALUE script_disposed_p(VALUE self)
     return script->disposed ? Qtrue : Qfalse;
 }
 
+static VALUE context_compile_module(int argc, VALUE *argv, VALUE self)
+{
+    VALUE a, e, source, filename, cached_data, produce_cache, kwargs;
+    VALUE module_v, result;
+    Module *m;
+    Context *c;
+    Ser s;
+
+    TypedData_Get_Struct(self, Context, &context_type, c);
+    if (atomic_load(&c->quit))
+        rb_raise(context_disposed_error, "disposed context");
+    rb_scan_args(argc, argv, "1:", &source, &kwargs);
+    Check_Type(source, T_STRING);
+    filename = Qnil;
+    cached_data = Qnil;
+    produce_cache = Qfalse;
+    if (!NIL_P(kwargs)) {
+        filename = rb_hash_aref(kwargs, ID2SYM(id_filename));
+        cached_data = rb_hash_aref(kwargs, ID2SYM(id_cached_data));
+        produce_cache = rb_hash_aref(kwargs, ID2SYM(id_produce_cache));
+    }
+    if (NIL_P(filename))
+        filename = rb_str_new_cstr("<compile_module>");
+    Check_Type(filename, T_STRING);
+    if (!NIL_P(cached_data)) {
+        Check_Type(cached_data, T_STRING);
+        // Refuse non-binary encodings so a user reading a cache file without
+        // 'rb' mode gets a clear error instead of mangled bytes flowing to V8.
+        if (rb_enc_get(cached_data) != rb_ascii8bit_encoding())
+            rb_raise(rb_eEncodingError,
+                     "cached_data must be ASCII-8BIT (binary), got %s",
+                     rb_enc_name(rb_enc_get(cached_data)));
+    }
+    ser_init1(&s, 'O');
+    ser_array_begin(&s, 4);
+    add_string(&s, filename);
+    add_string(&s, source);
+    if (NIL_P(cached_data)) {
+        ser_null(&s);
+    } else {
+        ser_uint8array(&s, (const uint8_t *)RSTRING_PTR(cached_data),
+                       RSTRING_LENINT(cached_data));
+    }
+    ser_bool(&s, RTEST(produce_cache));
+    ser_array_end(&s, 4);
+    a = rendezvous(c, &s.b);
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    result = rb_ary_pop(a);
+    Check_Type(result, T_ARRAY);
+
+    module_v = rb_obj_alloc(module_class); // skip the raising initialize
+    TypedData_Get_Struct(module_v, Module, &module_type, m);
+    m->context = self;
+    m->handle_id = NUM2INT(rb_ary_entry(result, 0));
+    m->cached_data = rb_ary_entry(result, 1);
+    m->cache_rejected = RTEST(rb_ary_entry(result, 2));
+    return module_v;
+}
+
+static VALUE module_cached_data(VALUE self)
+{
+    Module *m;
+    TypedData_Get_Struct(self, Module, &module_type, m);
+    return m->cached_data;
+}
+
+static VALUE module_cache_rejected_p(VALUE self)
+{
+    Module *m;
+    TypedData_Get_Struct(self, Module, &module_type, m);
+    return m->cache_rejected ? Qtrue : Qfalse;
+}
+
+static VALUE module_alloc(VALUE klass)
+{
+    Module *m;
+
+    m = ruby_xmalloc(sizeof(*m));
+    memset(m, 0, sizeof(*m));
+    m->context = Qnil;
+    m->cached_data = Qnil;
+    return TypedData_Wrap_Struct(klass, &module_type, m);
+}
+
+static void module_free(void *arg)
+{
+    // Intentionally does not send a dispose RPC — finalizers can't safely
+    // take rr_mtx. State::~State() walks st.modules at isolate teardown so
+    // we leak nothing across a Context's lifetime; use Module#dispose to
+    // free eagerly mid-lifetime.
+    ruby_xfree(arg);
+}
+
+static void module_mark(void *arg)
+{
+    Module *m = arg;
+    rb_gc_mark(m->context);
+    rb_gc_mark(m->cached_data);
+}
+
+static size_t module_size(const void *arg)
+{
+    (void)arg;
+    return sizeof(Module);
+}
+
+static VALUE module_initialize(int argc, VALUE *argv, VALUE self)
+{
+    (void)argc; (void)argv; (void)self;
+    rb_raise(runtime_error, "MiniRacer::Module must be created via Context#compile_module");
+    return Qnil;
+}
+
+struct instantiate_args {
+    Context *c;
+    int32_t  handle_id;
+    VALUE    prev_block;
+};
+
+static VALUE module_instantiate_body(VALUE arg)
+{
+    struct instantiate_args *ia = (struct instantiate_args *)arg;
+    VALUE a, e;
+    Ser s;
+
+    ser_init1(&s, 'I');
+    ser_int(&s, ia->handle_id);
+    a = rendezvous(ia->c, &s.b);
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    return Qnil;
+}
+
+static VALUE module_instantiate_restore(VALUE arg)
+{
+    struct instantiate_args *ia = (struct instantiate_args *)arg;
+    ia->c->resolve_block = ia->prev_block;
+    return Qnil;
+}
+
+static VALUE module_instantiate(VALUE self)
+{
+    VALUE block;
+    Module *m;
+    Context *c;
+    struct instantiate_args ia;
+
+    if (!rb_block_given_p())
+        rb_raise(rb_eArgError, "Module#instantiate requires a resolver block");
+    block = rb_block_proc();
+
+    TypedData_Get_Struct(self, Module, &module_type, m);
+    if (m->disposed)
+        rb_raise(runtime_error, "disposed module");
+    TypedData_Get_Struct(m->context, Context, &context_type, c);
+    if (atomic_load(&c->quit))
+        rb_raise(context_disposed_error, "disposed context");
+
+    // Save the previous resolver slot so a re-entrant instantiate from
+    // inside this block restores its caller's block on the way out.
+    // rb_ensure guarantees restoration even when the resolver block
+    // raises (without it, the slot would be left pointing at this call's
+    // block and keep it GC-alive until something else overwrites it).
+    ia.c = c;
+    ia.handle_id = m->handle_id;
+    ia.prev_block = c->resolve_block;
+    c->resolve_block = block;
+    rb_ensure(module_instantiate_body, (VALUE)&ia,
+              module_instantiate_restore, (VALUE)&ia);
+    return self;
+}
+
+static VALUE module_evaluate(VALUE self)
+{
+    VALUE a, e;
+    Module *m;
+    Context *c;
+    Ser s;
+
+    TypedData_Get_Struct(self, Module, &module_type, m);
+    if (m->disposed)
+        rb_raise(runtime_error, "disposed module");
+    TypedData_Get_Struct(m->context, Context, &context_type, c);
+    if (atomic_load(&c->quit))
+        rb_raise(context_disposed_error, "disposed context");
+    ser_init1(&s, 'V');
+    ser_int(&s, m->handle_id);
+    a = rendezvous(c, &s.b);
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    return rb_ary_pop(a);
+}
+
+static VALUE module_namespace(VALUE self)
+{
+    VALUE a, e;
+    Module *m;
+    Context *c;
+    Ser s;
+
+    TypedData_Get_Struct(self, Module, &module_type, m);
+    if (m->disposed)
+        rb_raise(runtime_error, "disposed module");
+    TypedData_Get_Struct(m->context, Context, &context_type, c);
+    if (atomic_load(&c->quit))
+        rb_raise(context_disposed_error, "disposed context");
+    ser_init1(&s, 'N');
+    ser_int(&s, m->handle_id);
+    a = rendezvous(c, &s.b);
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    return rb_ary_pop(a);
+}
+
+static VALUE module_status(VALUE self)
+{
+    VALUE a, e, result;
+    Module *m;
+    Context *c;
+    Ser s;
+
+    TypedData_Get_Struct(self, Module, &module_type, m);
+    if (m->disposed)
+        rb_raise(runtime_error, "disposed module");
+    TypedData_Get_Struct(m->context, Context, &context_type, c);
+    if (atomic_load(&c->quit))
+        rb_raise(context_disposed_error, "disposed context");
+    ser_init1(&s, 'U');
+    ser_int(&s, m->handle_id);
+    a = rendezvous(c, &s.b);
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    result = rb_ary_pop(a);
+    // v8_module_status always replies with a String on success; a non-string
+    // would mean the v8 thread fell through to the Undefined fail path with
+    // a missing error (shouldn't happen, but check defensively rather than
+    // crash rb_str_intern on Qnil).
+    Check_Type(result, T_STRING);
+    return rb_str_intern(result);
+}
+
+static VALUE module_dispose(VALUE self)
+{
+    VALUE e;
+    Module *m;
+    Context *c;
+    Ser s;
+
+    TypedData_Get_Struct(self, Module, &module_type, m);
+    if (m->disposed) return Qnil;
+    TypedData_Get_Struct(m->context, Context, &context_type, c);
+    // Context already gone? The handle was cleaned by State::~State().
+    if (atomic_load(&c->quit)) {
+        m->disposed = 1;
+        return Qnil;
+    }
+    ser_init1(&s, 'Z');
+    ser_int(&s, m->handle_id);
+    e = rendezvous(c, &s.b);
+    handle_exception(e);
+    // Mark disposed only after the V8 handle is actually freed so a retry
+    // after a transient rendezvous failure can still release it.
+    m->disposed = 1;
+    return Qnil;
+}
+
+static VALUE module_disposed_p(VALUE self)
+{
+    Module *m;
+    TypedData_Get_Struct(self, Module, &module_type, m);
+    return m->disposed ? Qtrue : Qfalse;
+}
+
+static VALUE context_set_dynamic_import_resolver(VALUE self, VALUE blk)
+{
+    Context *c;
+    TypedData_Get_Struct(self, Context, &context_type, c);
+    if (!NIL_P(blk) && !rb_respond_to(blk, rb_intern("call")))
+        rb_raise(rb_eTypeError,
+                 "dynamic_import_resolver must respond to #call or be nil");
+    c->dynamic_import_resolver = blk;
+    return blk;
+}
+
+static VALUE context_get_dynamic_import_resolver(VALUE self)
+{
+    Context *c;
+    TypedData_Get_Struct(self, Context, &context_type, c);
+    return c->dynamic_import_resolver;
+}
+
 __attribute__((visibility("default")))
 void Init_mini_racer_extension(void)
 {
@@ -2045,6 +2555,7 @@ void Init_mini_racer_extension(void)
     rb_define_method(c, "initialize", context_initialize, -1);
     rb_define_method(c, "attach", context_attach, 2);
     rb_define_method(c, "compile", context_compile, -1);
+    rb_define_method(c, "compile_module", context_compile_module, -1);
     rb_define_method(c, "dispose", context_dispose, 0);
     rb_define_method(c, "stop", context_stop, 0);
     rb_define_method(c, "call", context_call, -1);
@@ -2054,6 +2565,8 @@ void Init_mini_racer_extension(void)
     rb_define_method(c, "perform_microtask_checkpoint", context_perform_microtask_checkpoint, 0);
     rb_define_method(c, "pump_message_loop", context_pump_message_loop, 0);
     rb_define_method(c, "low_memory_notification", context_low_memory_notification, 0);
+    rb_define_method(c, "dynamic_import_resolver", context_get_dynamic_import_resolver, 0);
+    rb_define_method(c, "dynamic_import_resolver=", context_set_dynamic_import_resolver, 1);
     rb_define_alloc_func(c, context_alloc);
 
     c = script_class = rb_define_class_under(m, "Script", rb_cObject);
@@ -2064,6 +2577,18 @@ void Init_mini_racer_extension(void)
     rb_define_method(c, "dispose", script_dispose, 0);
     rb_define_method(c, "disposed?", script_disposed_p, 0);
     rb_define_alloc_func(c, script_alloc);
+
+    c = module_class = rb_define_class_under(m, "Module", rb_cObject);
+    rb_define_method(c, "initialize", module_initialize, -1);
+    rb_define_method(c, "instantiate", module_instantiate, 0);
+    rb_define_method(c, "evaluate", module_evaluate, 0);
+    rb_define_method(c, "namespace", module_namespace, 0);
+    rb_define_method(c, "status", module_status, 0);
+    rb_define_method(c, "cached_data", module_cached_data, 0);
+    rb_define_method(c, "cache_rejected?", module_cache_rejected_p, 0);
+    rb_define_method(c, "dispose", module_dispose, 0);
+    rb_define_method(c, "disposed?", module_disposed_p, 0);
+    rb_define_alloc_func(c, module_alloc);
 
     c = snapshot_class = rb_define_class_under(m, "Snapshot", rb_cObject);
     rb_define_method(c, "initialize", snapshot_initialize, -1);

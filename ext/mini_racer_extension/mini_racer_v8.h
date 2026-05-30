@@ -40,7 +40,13 @@ struct State *v8_thread_init(struct Context *c, const uint8_t *snapshot_buf,
 void v8_attach(struct State *pst, const uint8_t *p, size_t n);
 void v8_call(struct State *pst, const uint8_t *p, size_t n);
 void v8_compile(struct State *pst, const uint8_t *p, size_t n);
+void v8_compile_module(struct State *pst, const uint8_t *p, size_t n);
+void v8_dispose_module(struct State *pst, const uint8_t *p, size_t n);
 void v8_dispose_script(struct State *pst, const uint8_t *p, size_t n);
+void v8_evaluate_module(struct State *pst, const uint8_t *p, size_t n);
+void v8_instantiate_module(struct State *pst, const uint8_t *p, size_t n);
+void v8_module_namespace(struct State *pst, const uint8_t *p, size_t n);
+void v8_module_status(struct State *pst, const uint8_t *p, size_t n);
 void v8_eval(struct State *pst, const uint8_t *p, size_t n);
 void v8_run(struct State *pst, const uint8_t *p, size_t n);
 void v8_heap_stats(struct State *pst);
