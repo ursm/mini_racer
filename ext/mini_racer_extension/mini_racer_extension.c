@@ -1856,6 +1856,21 @@ out:
         rb_thread_lock_native_thread();
 }
 
+// Blocks until the V8 thread finishes booting the isolate, which includes
+// snapshot deserialization (v8::Isolate::New) and safe-context setup. None of
+// that touches Ruby objects -- the snapshot is a plain C buffer already copied
+// into |c->snapshot| -- so we release the GVL while waiting, letting other Ruby
+// threads (e.g. a background pool refilling more contexts) truly run meanwhile.
+static void *context_boot_wait(void *arg)
+{
+    Context *c;
+
+    c = arg;
+    barrier_wait(&c->early_init);
+    barrier_wait(&c->late_init);
+    return NULL;
+}
+
 static VALUE context_initialize(int argc, VALUE *argv, VALUE self)
 {
     VALUE kwargs, a, k, v;
@@ -1923,8 +1938,7 @@ init:
         pthread_attr_destroy(&attr);
         if (r)
             goto fail;
-        barrier_wait(&c->early_init);
-        barrier_wait(&c->late_init);
+        rb_thread_call_without_gvl(context_boot_wait, c, NULL, NULL);
     }
     // Deferred to first Context.new so Platform.set_flags! still has effect
     // on the tag (which depends on V8 flags applied during v8_global_init).
