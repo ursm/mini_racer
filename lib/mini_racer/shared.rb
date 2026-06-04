@@ -225,6 +225,13 @@ module MiniRacer
       end
     end
 
+    # reset_realm tears down the JavaScript realm while keeping the warm
+    # isolate. It depends on V8's isolate/realm split, which the TruffleRuby
+    # (Graal.js) backend does not expose, so it is unavailable here.
+    def reset_realm
+      raise NotImplementedError, "reset_realm is only available on the V8 backend"
+    end
+
     private
 
     def ensure_gc_thread

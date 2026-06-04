@@ -1197,6 +1197,122 @@ class MiniRacerTest < Minitest::Test
     refute(context.eval("globalThis.reached_after"))
   end
 
+  def reset_realm_context(**options)
+    if RUBY_ENGINE == "truffleruby"
+      skip "reset_realm is only implemented on the V8 backend"
+    end
+    MiniRacer::Context.new(**options)
+  end
+
+  def test_reset_realm_clears_globals_but_keeps_eval_working
+    context = reset_realm_context
+
+    context.eval("globalThis.leaked = 42")
+    assert_equal(42, context.eval("globalThis.leaked"))
+
+    context.reset_realm
+
+    # The whole realm (globalThis and everything on it) is gone...
+    assert_equal("undefined", context.eval("typeof globalThis.leaked"))
+    # ...but the context is still usable against the fresh realm.
+    assert_equal(2, context.eval("1 + 1"))
+  end
+
+  def test_reset_realm_reattaches_host_functions
+    context = reset_realm_context
+
+    calls = 0
+    # Two functions at different dotted paths, exercising the re-bind loop over
+    # every registered callback (not just the last one).
+    context.attach("host.add", proc { |a, b| calls += 1; a + b })
+    context.attach("util.mul", proc { |a, b| a * b })
+    assert_equal(5, context.eval("host.add(2, 3)"))
+
+    context.reset_realm
+
+    # The JS shims were dropped with the old global; reset_realm re-binds them
+    # onto the fresh global so the same Ruby procs keep working. Check both the
+    # eval path and the call() name-resolution path.
+    assert_equal(30, context.eval("host.add(10, 20)"))
+    assert_equal(30, context.call("host.add", 10, 20))
+    assert_equal(42, context.call("util.mul", 6, 7))
+    assert_equal(3, calls)
+  end
+
+  def test_reset_realm_is_refused_from_within_a_host_callback
+    context = reset_realm_context
+
+    # Resetting the realm while a JS->Ruby callback is suspended mid-roundtrip
+    # would swap the realm out from under the callback frame; it must be refused.
+    context.attach("boom", proc { context.reset_realm })
+    error = assert_raises(MiniRacer::RuntimeError) { context.eval("boom()") }
+    assert_match(/within a host function callback/, error.message)
+
+    # The context must remain healthy after the refusal.
+    assert_equal(2, context.eval("1 + 1"))
+  end
+
+  def test_reset_realm_not_implemented_on_truffleruby
+    unless RUBY_ENGINE == "truffleruby"
+      skip "checks the TruffleRuby backend stub"
+    end
+    assert_raises(NotImplementedError) { MiniRacer::Context.new.reset_realm }
+  end
+
+  def test_reset_realm_reinstalls_host_namespace
+    context = reset_realm_context(host_namespace: "MiniRacer")
+
+    assert_equal("function", context.eval("typeof MiniRacer.drainMicrotasks"))
+    context.reset_realm
+    assert_equal("function", context.eval("typeof MiniRacer.drainMicrotasks"))
+  end
+
+  def test_reset_realm_restores_snapshot_globals
+    snapshot = MiniRacer::Snapshot.new("globalThis.VENDOR = { ok: 7 };")
+    context = reset_realm_context(snapshot: snapshot)
+
+    assert_equal(7, context.eval("VENDOR.ok"))
+    context.eval("VENDOR.ok = 999; globalThis.perPage = true")
+    context.reset_realm
+
+    # The fresh realm comes from the same startup snapshot, so vendor globals
+    # are back at their pristine values and per-page mutations are gone.
+    assert_equal(7, context.eval("VENDOR.ok"))
+    assert_equal("undefined", context.eval("typeof globalThis.perPage"))
+  end
+
+  def test_reset_realm_is_repeatable
+    context = reset_realm_context
+
+    5.times do |i|
+      context.eval("globalThis.n = #{i}")
+      assert_equal(i, context.eval("globalThis.n"))
+      context.reset_realm
+      assert_equal("undefined", context.eval("typeof globalThis.n"))
+    end
+  end
+
+  def test_reset_realm_collects_the_old_realm
+    context = reset_realm_context
+
+    bloat = 'globalThis.junk = Array.from({length: 200000}, (_, i) => ({ i, s: "x".repeat(20) }));'
+    context.eval(bloat)
+    context.low_memory_notification
+    baseline = context.heap_stats[:used_heap_size]
+
+    20.times do
+      context.eval(bloat)
+      context.reset_realm
+    end
+    context.low_memory_notification
+    final = context.heap_stats[:used_heap_size]
+
+    # Each iteration leaks ~24MB of realm-scoped state if the old realm is not
+    # collected. If reset_realm works, the heap returns to roughly baseline
+    # regardless of how many resets ran.
+    assert_operator(final, :<, baseline * 2)
+  end
+
   def test_webassembly
     if RUBY_ENGINE == "truffleruby"
       skip "TruffleRuby does not enable WebAssembly by default"

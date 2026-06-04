@@ -58,6 +58,8 @@ void v8_snapshot(struct State *pst, const uint8_t *p, size_t n);
 void v8_warmup(struct State *pst, const uint8_t *p, size_t n);
 void v8_low_memory_notification(struct State *pst);
 void v8_terminate_execution(struct State *pst); // called from ruby or watchdog thread
+void v8_reset_realm(struct State *pst);
+void v8_threaded_enter(struct State *pst, struct Context *c, void (*f)(struct Context *c));
 void v8_single_threaded_enter(struct State *pst, struct Context *c, void (*f)(struct Context *c));
 void v8_single_threaded_dispose(struct State *pst);
 uint32_t v8_cached_data_version_tag(void); // safe to call after v8_global_init

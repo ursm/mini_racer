@@ -152,6 +152,25 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     RUBY
   end
 
+  def test_reset_realm
+    # reset_realm swaps the realm by re-deriving the per-request Locals from the
+    # persistents; in single-threaded mode that path runs on the shared Ruby
+    # thread, so a regression that mishandles the Locker/scope would deadlock
+    # (caught by the bounded wait) rather than just fail.
+    assert_single_threaded_script <<~'RUBY'
+      context = MiniRacer::Context.new
+      context.attach("host.add", proc { |a, b| a + b })
+      context.eval("globalThis.leaked = 1")
+      raise "bad host" unless context.eval("host.add(2, 3)") == 5
+
+      context.reset_realm
+
+      raise "global survived reset" unless context.eval("typeof globalThis.leaked") == "undefined"
+      raise "host not re-attached" unless context.eval("host.add(20, 22)") == 42
+      raise "fresh eval broke" unless context.eval("1 + 1") == 2
+    RUBY
+  end
+
   def test_host_namespace_drain_microtasks
     # The native checkpoint runs inline on the isolate thread and must not take
     # a v8::Locker, which would deadlock when V8 shares the Ruby thread.

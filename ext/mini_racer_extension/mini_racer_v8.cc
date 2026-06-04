@@ -67,6 +67,10 @@ struct Callback
 {
     struct State *st;
     int32_t id;
+    // The dotted global path the callback was attached at (e.g. "foo.bar").
+    // Retained so the JS shim function can be re-bound onto a fresh global
+    // after Context#reset_realm swaps the user realm.
+    std::string name;
 };
 
 // V8 doesn't expose ScriptOrigin's filename back from a v8::Module
@@ -97,10 +101,19 @@ struct State
     // and want to be sure they haven't been tampered with by JS code
     v8::Local<v8::Context> safe_context;
     v8::Local<v8::Function> safe_context_function;
-    v8::Persistent<v8::Context> persistent_context;         // single-thread mode only
-    v8::Persistent<v8::Context> persistent_safe_context;    // single-thread mode only
-    v8::Persistent<v8::Function> persistent_safe_context_function;  // single-thread mode only
+    // Canonical roots for the user/safe realm. The Local members above are
+    // re-derived from these on every request (see v8_threaded_enter /
+    // v8_single_threaded_enter), so swapping the realm is just a matter of
+    // Reset()-ing these in install_realm — the old realm then has no roots
+    // left and is collected.
+    v8::Persistent<v8::Context> persistent_context;
+    v8::Persistent<v8::Context> persistent_safe_context;
+    v8::Persistent<v8::Function> persistent_safe_context_function;
     v8::Persistent<v8::Value> ruby_exception;
+    // The opt-in host namespace name (Context.new(host_namespace:)), retained
+    // so it can be re-installed on a fresh realm after reset_realm. Empty when
+    // the embedder did not opt in.
+    std::string host_namespace;
     Context *ruby_context;
     int64_t max_memory;
     int err_reason;
@@ -355,6 +368,17 @@ static const std::string& module_filename(State& st, v8::Local<v8::Module> mod)
     return empty;
 }
 
+// RAII marker that the V8 thread is suspended inside a host->Ruby->host
+// roundtrip — a host-function call (v8_api_callback), a dynamic import, or a
+// module-resolve. While in_callback is nonzero: compile() refuses
+// CreateCodeCache (it corrupts V8's parser when run from such a frame), and
+// reset_realm refuses to swap the realm out from under the suspended frame.
+struct CallbackGuard {
+    State &st;
+    CallbackGuard(State &s) : st(s) { st.in_callback++; }
+    ~CallbackGuard()                { st.in_callback--; }
+};
+
 // V8 calls this for every JS `import(...)` expression. We rendezvous to
 // Ruby (marker 'd'), expect a fully-instantiated MiniRacer::Module back,
 // evaluate it if still pending, then resolve the returned Promise with
@@ -371,6 +395,8 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
     auto isolate = context->GetIsolate();
     State *pst = static_cast<State*>(isolate->GetData(0));
     State& st = *pst;
+    // Suspended in a host->Ruby roundtrip for the whole resolver exchange.
+    CallbackGuard _guard(st);
     v8::EscapableHandleScope handle_scope(isolate);
 
     v8::Local<v8::Promise::Resolver> resolver;
@@ -546,6 +572,16 @@ void v8_drain_microtasks_callback(const v8::FunctionCallbackInfo<v8::Value>& inf
     info.GetReturnValue().SetUndefined();
 }
 
+// Builds a fresh user realm (plus the companion safe context), wires the
+// safe-context marshalling helper against the new global, installs the opt-in
+// host namespace, and re-binds any previously attached host functions. On
+// success it atomically commits the new realm into st.persistent_* (releasing
+// the previous one) and returns true. On any failure it touches none of the
+// persistents — the previous realm stays intact — and returns false with an
+// exception pending in the caller's TryCatch. Defined after v8_api_callback
+// (which the re-bind needs). Assumes the isolate is entered by the caller.
+static bool install_realm(State& st);
+
 extern "C" State *v8_thread_init(Context *c, const uint8_t *snapshot_buf,
                                  size_t snapshot_len, int64_t max_memory,
                                  int verbose_exceptions,
@@ -580,61 +616,19 @@ extern "C" State *v8_thread_init(Context *c, const uint8_t *snapshot_buf,
         v8::Locker locker(st.isolate);
         v8::Isolate::Scope isolate_scope(st.isolate);
         v8::HandleScope handle_scope(st.isolate);
-        st.safe_context = v8::Context::New(st.isolate);
-        st.context = v8::Context::New(st.isolate);
-        v8::Context::Scope context_scope(st.context);
-        {
-            v8::Context::Scope context_scope(st.safe_context);
-            auto source = v8::String::NewFromUtf8Literal(st.isolate, safe_context_script_source);
-            auto filename = v8::String::NewFromUtf8Literal(st.isolate, "safe_context_script.js");
-            v8::ScriptOrigin origin(filename);
-            auto script =
-                v8::Script::Compile(st.safe_context, source, &origin)
-                .ToLocalChecked();
-            auto function_v = script->Run(st.safe_context).ToLocalChecked();
-            auto function = v8::Function::Cast(*function_v);
-            auto recv = v8::Undefined(st.isolate);
-            v8::Local<v8::Value> arg = st.context->Global();
-            // grant the safe context access to the user context's globalThis
-            st.safe_context->SetSecurityToken(st.context->GetSecurityToken());
-            function_v =
-                function->Call(st.safe_context, recv, 1, &arg)
-                .ToLocalChecked();
-            // revoke access again now that the script did its one-time setup
-            st.safe_context->UseDefaultSecurityToken();
-            st.safe_context_function = v8::Local<v8::Function>::Cast(function_v);
+        st.host_namespace = host_namespace ? host_namespace : "";
+        // Build the user/safe realm and root it in st.persistent_*. The Local
+        // members are not kept alive past here; each request re-derives them
+        // from the persistents (see v8_threaded_enter / v8_single_threaded_enter).
+        // On a fresh isolate this only fails under catastrophic conditions (it
+        // used to be a hard CHECK), so treat boot failure as fatal.
+        if (!install_realm(st)) {
+            fprintf(stderr, "mini_racer: failed to initialize the V8 realm\n");
+            fflush(stderr);
+            abort();
         }
-        // If the embedder opted in via Context.new(host_namespace:), install a
-        // single host-namespace object (in the spirit of Deno's `Deno` / Bun's
-        // `Bun`) under that global name and hang native helpers off it. The
-        // object closes over native code pointers so it cannot live in the
-        // (de)serialized snapshot; it is installed here on every fresh context.
-        // Both multi-threaded and single-threaded contexts (and snapshot-backed
-        // ones) reach this point exactly once via v8_thread_init, so this
-        // covers them all. The namespace is non-enumerable on globalThis so it
-        // stays out of Object.keys(globalThis)/for-in; its methods are ordinary
-        // enumerable properties so they remain discoverable on the object.
-        if (host_namespace && *host_namespace) {
-            v8::Local<v8::String> ns_name;
-            if (v8::String::NewFromUtf8(st.isolate, host_namespace).ToLocal(&ns_name)) {
-                auto ns = v8::Object::New(st.isolate);
-                auto data = v8::External::New(st.isolate, pst);
-                auto drain_name = v8::String::NewFromUtf8Literal(st.isolate, "drainMicrotasks");
-                auto drain =
-                    v8::Function::New(st.context, v8_drain_microtasks_callback, data)
-                    .ToLocalChecked();
-                ns->Set(st.context, drain_name, drain).Check();
-                st.context->Global()
-                    ->DefineOwnProperty(st.context, ns_name, ns, v8::DontEnum)
-                    .Check();
-            }
-        }
-        if (single_threaded) {
-            st.persistent_safe_context_function.Reset(st.isolate, st.safe_context_function);
-            st.persistent_safe_context.Reset(st.isolate, st.safe_context);
-            st.persistent_context.Reset(st.isolate, st.context);
+        if (single_threaded)
             return pst; // intentionally returning early and keeping alive
-        }
         v8_thread_main(c, pst);
     }
     delete pst;
@@ -646,12 +640,8 @@ void v8_api_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
     auto ext = v8::External::Cast(*info.Data());
     Callback *cb = static_cast<Callback*>(ext->Value());
     State& st = *cb->st;
-    // RAII counter so re-entrant compile() can refuse CreateCodeCache.
-    struct CallbackGuard {
-        State &st;
-        CallbackGuard(State &s) : st(s) { st.in_callback++; }
-        ~CallbackGuard()                { st.in_callback--; }
-    } _guard(st);
+    // Suspended in a host->Ruby roundtrip for the whole callback exchange.
+    CallbackGuard _guard(st);
     v8::Local<v8::Array> request;
     {
         v8::Context::Scope context_scope(st.safe_context);
@@ -695,6 +685,137 @@ void v8_api_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
     info.GetReturnValue().Set(result);
 }
 
+// Binds cb's JS shim onto the current user global at cb->name, creating any
+// intermediate objects for dotted "foo.bar.baz" paths. The Callback must
+// already be registered in st.callbacks (it owns the External we hand to v8).
+// Returns false with an exception pending in the caller's TryCatch on failure.
+static bool bind_callback(State& st, Callback *cb)
+{
+    auto ext = v8::External::New(st.isolate, cb);
+    v8::Local<v8::Function> function;
+    if (!v8::Function::New(st.context, v8_api_callback, ext).ToLocal(&function))
+        return false;
+    auto type = v8::NewStringType::kNormal;
+    v8::Local<v8::Object> obj = st.context->Global();
+    v8::Local<v8::String> key;
+    for (const char *p = cb->name.c_str();;) {
+        size_t len = strcspn(p, ".");
+        if (!v8::String::NewFromUtf8(st.isolate, p, type, len).ToLocal(&key))
+            return false;
+        if (p[len] == '\0') break;
+        p += len + 1;
+        v8::Local<v8::Value> val;
+        if (!obj->Get(st.context, key).ToLocal(&val)) return false;
+        if (!val->IsObject() && !val->IsFunction()) {
+            val = v8::Object::New(st.isolate);
+            if (!obj->Set(st.context, key, val).FromMaybe(false)) return false;
+        }
+        obj = val.As<v8::Object>();
+    }
+    return obj->Set(st.context, key, function).FromMaybe(false);
+}
+
+// Re-derive the per-request realm Locals from the canonical persistents, and
+// drop them again. Kept in one place so every entry point lists the same three
+// members in the same order (v8_threaded_enter, v8_single_threaded_enter,
+// v8_reset_realm).
+static void restore_realm_locals(State& st)
+{
+    st.safe_context_function = v8::Local<v8::Function>::New(st.isolate, st.persistent_safe_context_function);
+    st.safe_context = v8::Local<v8::Context>::New(st.isolate, st.persistent_safe_context);
+    st.context = v8::Local<v8::Context>::New(st.isolate, st.persistent_context);
+}
+
+static void clear_realm_locals(State& st)
+{
+    st.context = v8::Local<v8::Context>();
+    st.safe_context = v8::Local<v8::Context>();
+    st.safe_context_function = v8::Local<v8::Function>();
+}
+
+// See the forward declaration above v8_thread_init for the contract. All
+// build-time handles live in a private HandleScope. Nothing is committed until
+// the realm is fully built (including every host-fn re-bind), so a failure
+// midway — e.g. the isolate is terminating from a watchdog/OOM — leaves the
+// previous realm untouched instead of CHECK-crashing the process.
+static bool install_realm(State& st)
+{
+    State *pst = &st;
+    v8::HandleScope handle_scope(st.isolate);
+    v8::Local<v8::Context> safe_context = v8::Context::New(st.isolate);
+    v8::Local<v8::Context> context = v8::Context::New(st.isolate);
+    if (safe_context.IsEmpty() || context.IsEmpty()) return false;
+    v8::Local<v8::Function> safe_context_function;
+    {
+        v8::Context::Scope safe_scope(safe_context);
+        auto source = v8::String::NewFromUtf8Literal(st.isolate, safe_context_script_source);
+        auto filename = v8::String::NewFromUtf8Literal(st.isolate, "safe_context_script.js");
+        v8::ScriptOrigin origin(filename);
+        v8::Local<v8::Script> script;
+        if (!v8::Script::Compile(safe_context, source, &origin).ToLocal(&script))
+            return false;
+        v8::Local<v8::Value> function_v;
+        if (!script->Run(safe_context).ToLocal(&function_v)) return false;
+        auto function = v8::Function::Cast(*function_v);
+        auto recv = v8::Undefined(st.isolate);
+        v8::Local<v8::Value> arg = context->Global();
+        // grant the safe context access to the user context's globalThis
+        safe_context->SetSecurityToken(context->GetSecurityToken());
+        v8::Local<v8::Value> ret;
+        bool ok = function->Call(safe_context, recv, 1, &arg).ToLocal(&ret);
+        // revoke access again now that the script did its one-time setup
+        safe_context->UseDefaultSecurityToken();
+        if (!ok) return false;
+        safe_context_function = v8::Local<v8::Function>::Cast(ret);
+    }
+    v8::Context::Scope context_scope(context);
+    // If the embedder opted in via Context.new(host_namespace:), install a
+    // single host-namespace object (in the spirit of Deno's `Deno` / Bun's
+    // `Bun`) under that global name and hang native helpers off it. The object
+    // closes over native code pointers so it cannot live in the (de)serialized
+    // snapshot; it is installed here on every fresh realm. The namespace is
+    // non-enumerable on globalThis so it stays out of Object.keys(globalThis)/
+    // for-in; its methods are ordinary enumerable properties so they remain
+    // discoverable on the object.
+    if (!st.host_namespace.empty()) {
+        v8::Local<v8::String> ns_name;
+        if (!v8::String::NewFromUtf8(st.isolate, st.host_namespace.c_str()).ToLocal(&ns_name))
+            return false;
+        auto ns = v8::Object::New(st.isolate);
+        auto data = v8::External::New(st.isolate, pst);
+        auto drain_name = v8::String::NewFromUtf8Literal(st.isolate, "drainMicrotasks");
+        v8::Local<v8::Function> drain;
+        if (!v8::Function::New(context, v8_drain_microtasks_callback, data).ToLocal(&drain))
+            return false;
+        if (!ns->Set(context, drain_name, drain).FromMaybe(false)) return false;
+        if (!context->Global()->DefineOwnProperty(context, ns_name, ns, v8::DontEnum).FromMaybe(false))
+            return false;
+    }
+    // Re-attach host functions onto the fresh global. Empty at boot; populated
+    // when install_realm runs from v8_reset_realm. bind_callback reads st.context,
+    // so point the members at the new realm for the duration of the loop, and
+    // make the whole rebuild atomic: if any function cannot be re-bound (e.g. a
+    // dotted path now collides with a snapshot global) the reset fails as a whole
+    // rather than silently dropping a host function.
+    st.context = context;
+    st.safe_context = safe_context;
+    st.safe_context_function = safe_context_function;
+    for (Callback *cb : st.callbacks) {
+        if (!bind_callback(st, cb)) {
+            clear_realm_locals(st);
+            return false;
+        }
+    }
+    // Commit: root the new realm and release the previous one (Reset replaces
+    // the old handle). The Local members dangle once handle_scope unwinds, so
+    // clear them; the next per-request restore re-derives them.
+    st.persistent_safe_context_function.Reset(st.isolate, safe_context_function);
+    st.persistent_safe_context.Reset(st.isolate, safe_context);
+    st.persistent_context.Reset(st.isolate, context);
+    clear_realm_locals(st);
+    return true;
+}
+
 // response is err or empty string
 extern "C" void v8_attach(State *pst, const uint8_t *p, size_t n)
 {
@@ -718,31 +839,19 @@ extern "C" void v8_attach(State *pst, const uint8_t *p, size_t n)
         if (!name_v->ToString(st.context).ToLocal(&name)) goto fail;
         int32_t id;
         if (!id_v->Int32Value(st.context).To(&id)) goto fail;
-        Callback *cb = new Callback{pst, id};
-        st.callbacks.push_back(cb);
-        v8::Local<v8::External> ext = v8::External::New(st.isolate, cb);
-        v8::Local<v8::Function> function;
-        if (!v8::Function::New(st.context, v8_api_callback, ext).ToLocal(&function)) goto fail;
         // support foo.bar.baz paths
         v8::String::Utf8Value path(st.isolate, name);
         if (!*path) goto fail;
-        v8::Local<v8::Object> obj = st.context->Global();
-        v8::Local<v8::String> key;
-        for (const char *p = *path;;) {
-            size_t n = strcspn(p, ".");
-            auto type = v8::NewStringType::kNormal;
-            if (!v8::String::NewFromUtf8(st.isolate, p, type, n).ToLocal(&key)) goto fail;
-            if (p[n] == '\0') break;
-            p += n + 1;
-            v8::Local<v8::Value> val;
-            if (!obj->Get(st.context, key).ToLocal(&val)) goto fail;
-            if (!val->IsObject() && !val->IsFunction()) {
-                val = v8::Object::New(st.isolate);
-                if (!obj->Set(st.context, key, val).FromMaybe(false)) goto fail;
-            }
-            obj = val.As<v8::Object>();
+        // The Callback owns its name so reset_realm can re-bind it later. Only
+        // register it in st.callbacks (which outlives realm swaps and drives the
+        // re-bind) after the bind succeeds, so a failed attach is not resurrected
+        // by a later reset_realm. Freed in ~State() once registered.
+        Callback *cb = new Callback{pst, id, std::string(*path)};
+        if (!bind_callback(st, cb)) {
+            delete cb;
+            goto fail;
         }
-        if (!obj->Set(st.context, key, function).FromMaybe(false)) goto fail;
+        st.callbacks.push_back(cb);
     }
     cause = NO_ERROR;
 fail:
@@ -1046,6 +1155,8 @@ static v8::MaybeLocal<v8::Module> resolve_module_callback(
     v8::Isolate *isolate = context->GetIsolate();
     State *pst = static_cast<State*>(isolate->GetData(0));
     State& st = *pst;
+    // Suspended in a host->Ruby roundtrip for the whole resolve exchange.
+    CallbackGuard _guard(st);
 
     // InstantiateModule walks the entire import graph in one call; without
     // an explicit scope, every Local allocated per import (request, dispatch
@@ -1809,6 +1920,89 @@ extern "C" void v8_terminate_execution(State *pst)
     pst->isolate->TerminateExecution();
 }
 
+// Per-request realm restore for the dedicated V8 thread. v8_thread_init holds
+// the Locker + Isolate::Scope for the thread's whole life, so unlike
+// v8_single_threaded_enter this only needs a HandleScope. Re-deriving the
+// Locals from the persistents on every request is what lets v8_reset_realm
+// swap the realm underneath the running loop.
+extern "C" void v8_threaded_enter(State *pst, Context *c, void (*f)(Context *c))
+{
+    State& st = *pst;
+    v8::HandleScope handle_scope(st.isolate);
+    restore_realm_locals(st);
+    {
+        v8::Context::Scope context_scope(st.context);
+        f(c);
+    }
+    clear_realm_locals(st);
+}
+
+// Drops the current user realm and installs a fresh one from the (snapshot)
+// default context, keeping the isolate — and its warm compilation cache —
+// alive. The opt-in host namespace and any attached host functions are
+// re-applied. Once install_realm commits the new realm and the old realm's
+// remaining roots are released below, the previous globalThis (and everything
+// hung off it) is unreachable and gets collected.
+extern "C" void v8_reset_realm(State *pst)
+{
+    State& st = *pst;
+    v8::TryCatch try_catch(st.isolate);
+    try_catch.SetVerbose(st.verbose_exceptions);
+    v8::HandleScope handle_scope(st.isolate);
+
+    // Refuse to swap the realm out from under a JS->Ruby callback. When a host
+    // function's Ruby code calls reset_realm, an outer v8_api_callback frame is
+    // suspended mid-roundtrip with the old context entered and would resume
+    // against the swapped realm — corrupting it. (in_callback is the same signal
+    // that makes compile() refuse CreateCodeCache mid-callback.)
+    if (st.in_callback > 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%c%s", RUNTIME_ERROR,
+                 "reset_realm cannot be called from within a host function callback");
+        v8::Local<v8::String> err;
+        if (!v8::String::NewFromUtf8(st.isolate, buf).ToLocal(&err))
+            err = v8::String::Empty(st.isolate);
+        reply_retry(st, err);
+        return;
+    }
+
+    // install_realm is all-or-nothing: on failure the previous realm is left
+    // intact in the persistents. Surface the cause, and if a watchdog/OOM
+    // terminated execution mid-rebuild, clear it here so it does not poison the
+    // next unrelated request (mirrors v8_eval/v8_call's termination handling).
+    if (!install_realm(st)) {
+        int cause;
+        if (st.isolate->IsExecutionTerminating()) {
+            st.isolate->CancelTerminateExecution();
+            cause = st.err_reason ? st.err_reason : TERMINATED_ERROR;
+            st.err_reason = NO_ERROR;
+        } else {
+            cause = try_catch.HasCaught() ? RUNTIME_ERROR : INTERNAL_ERROR;
+        }
+        // Restore Locals (the rebuild may have cleared them) so the error reply
+        // can be serialized against the surviving realm.
+        restore_realm_locals(st);
+        reply_retry(st, to_error(st, &try_catch, cause));
+        return;
+    }
+
+    // New realm committed. Release the remaining roots into the old realm:
+    // a pending ruby-exception handle and the scripts/modules compiled against
+    // it (their handles are realm-bound, so they would both pin the old realm
+    // and, if run after the swap, execute against the wrong globalThis — they
+    // are invalidated here).
+    st.ruby_exception.Reset();
+    for (auto& kv : st.scripts) kv.second->Reset();
+    st.scripts.clear();
+    st.modules.clear();
+
+    // Restore Locals from the new persistents and enter the new context so the
+    // reply is serialized against it (install_realm leaves the members empty).
+    restore_realm_locals(st);
+    v8::Context::Scope context_scope(st.context);
+    reply_retry(st, to_error(st, &try_catch, NO_ERROR));
+}
+
 extern "C" void v8_single_threaded_enter(State *pst, Context *c, void (*f)(Context *c))
 {
     State& st = *pst;
@@ -1816,14 +2010,10 @@ extern "C" void v8_single_threaded_enter(State *pst, Context *c, void (*f)(Conte
     v8::Isolate::Scope isolate_scope(st.isolate);
     v8::HandleScope handle_scope(st.isolate);
     {
-        st.safe_context_function = v8::Local<v8::Function>::New(st.isolate, st.persistent_safe_context_function);
-        st.safe_context = v8::Local<v8::Context>::New(st.isolate, st.persistent_safe_context);
-        st.context = v8::Local<v8::Context>::New(st.isolate, st.persistent_context);
+        restore_realm_locals(st);
         v8::Context::Scope context_scope(st.context);
         f(c);
-        st.context = v8::Local<v8::Context>();
-        st.safe_context = v8::Local<v8::Context>();
-        st.safe_context_function = v8::Local<v8::Function>();
+        clear_realm_locals(st);
     }
 }
 
@@ -1846,6 +2036,7 @@ State::~State()
         v8::Isolate::Scope isolate_scope(isolate);
         modules.clear();
         scripts.clear();
+        persistent_safe_context_function.Reset();
         persistent_safe_context.Reset();
         persistent_context.Reset();
         ruby_exception.Reset();

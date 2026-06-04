@@ -882,6 +882,7 @@ static void dispatch1(Context *c, const uint8_t *p, size_t n)
     case 'C': return v8_timedwait(c, p+1, n-1, v8_call);
     case 'D': return v8_dispose_script(c->pst, p+1, n-1);
     case 'E': return v8_timedwait(c, p+1, n-1, v8_eval);
+    case 'F': return v8_reset_realm(c->pst);                // (F)resh realm
     case 'H': return v8_heap_snapshot(c->pst);
     case 'I': return v8_timedwait(c, p+1, n-1, v8_instantiate_module); // (I)nstantiate module
     case 'K': return v8_timedwait(c, p+1, n-1, v8_compile); // (K)ompile — 'C' is taken
@@ -936,7 +937,11 @@ void v8_thread_main(Context *c, struct State *pst)
         }
         if (!c->req.len)
             continue; // spurious wakeup or quit signal from other thread
-        dispatch(c);
+        // Restore the realm from its persistents for this request (so
+        // reset_realm can swap it between requests), then dispatch. Nested
+        // dispatches during a callback roundtrip reuse the same restored realm
+        // and so go through v8_dispatch directly, without re-entering.
+        v8_threaded_enter(c->pst, c, dispatch);
         issued_idle_gc = false;
         pthread_cond_signal(&c->cv);
     }
@@ -1736,6 +1741,26 @@ static VALUE context_perform_microtask_checkpoint(VALUE self)
     buf_init(&b);
     buf_putc(&b, 'M');        // (M)icrotask checkpoint, returns nil
     return rendezvous(c, &b); // takes ownership of |b|
+}
+
+// EXPERIMENTAL (spike): tears down the current JavaScript realm (globalThis,
+// every global it carried, registered custom elements, pending timers, ...)
+// and installs a pristine one from the startup snapshot, keeping the warm
+// isolate. The opt-in host namespace and any attach()ed host functions are
+// re-applied automatically. Previously compiled scripts/modules are realm-bound
+// and are invalidated by the reset. Refused from within a host callback.
+static VALUE context_reset_realm(VALUE self)
+{
+    Context *c;
+    VALUE e;
+    Buf b;
+
+    TypedData_Get_Struct(self, Context, &context_type, c);
+    buf_init(&b);
+    buf_putc(&b, 'F');     // (F)resh realm, returns err or undefined
+    e = rendezvous(c, &b); // takes ownership of |b|
+    handle_exception(e);
+    return Qnil;
 }
 
 static VALUE context_pump_message_loop(VALUE self)
@@ -2608,6 +2633,7 @@ void Init_mini_racer_extension(void)
     rb_define_method(c, "heap_stats", context_heap_stats, 0);
     rb_define_method(c, "heap_snapshot", context_heap_snapshot, 0);
     rb_define_method(c, "perform_microtask_checkpoint", context_perform_microtask_checkpoint, 0);
+    rb_define_method(c, "reset_realm", context_reset_realm, 0);
     rb_define_method(c, "pump_message_loop", context_pump_message_loop, 0);
     rb_define_method(c, "low_memory_notification", context_low_memory_notification, 0);
     rb_define_method(c, "dynamic_import_resolver", context_get_dynamic_import_resolver, 0);
