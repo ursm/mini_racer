@@ -171,6 +171,25 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     RUBY
   end
 
+  def test_load_module_graph
+    # The batched fetch/resolve round-trips run on the shared Ruby thread in
+    # single-threaded mode; a regression that mishandled the rendezvous would
+    # deadlock (caught by the bounded wait) rather than just fail.
+    assert_single_threaded_script <<~'RUBY'
+      context = MiniRacer::Context.new
+      sources = {
+        "/app.js" => 'import {a} from "./a.js"; globalThis.OUT = a + 5;',
+        "/a.js"   => "export const a = 37;",
+      }
+      resolve = ->(edges) { edges.map { |spec, _ref| "/" + spec.sub(%r{\A\./}, "") } }
+      fetch   = ->(urls)  { urls.map  { |u| (s = sources[u]) ? [s, nil] : nil } }
+
+      r = context.load_module_graph("/app.js", resolve: resolve, fetch_batch: fetch)
+      raise "bad eval" unless context.eval("globalThis.OUT") == 42
+      raise "bad modules" unless r[:modules].map { |m| m[:url] }.sort == ["/a.js", "/app.js"]
+    RUBY
+  end
+
   def test_host_namespace_drain_microtasks
     # The native checkpoint runs inline on the isolate thread and must not take
     # a v8::Locker, which would deadlock when V8 shares the Ruby thread.

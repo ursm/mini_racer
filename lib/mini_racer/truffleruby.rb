@@ -420,6 +420,11 @@ module MiniRacer
             'Context#compile_module is not supported on TruffleRuby'
     end
 
+    def load_module_graph(*_args, **_opts)
+      raise NotImplementedError,
+            'Context#load_module_graph is not supported on TruffleRuby'
+    end
+
     # nil is the documented "disable" value; accept it as a no-op so that
     # `ctx.dynamic_import_resolver ||= ...` style code doesn't crash on
     # TruffleRuby. Any callable raises, mirroring `compile_module`.

@@ -45,6 +45,7 @@ void v8_compile_module(struct State *pst, const uint8_t *p, size_t n);
 void v8_dispose_module(struct State *pst, const uint8_t *p, size_t n);
 void v8_dispose_script(struct State *pst, const uint8_t *p, size_t n);
 void v8_evaluate_module(struct State *pst, const uint8_t *p, size_t n);
+void v8_load_module_graph(struct State *pst, const uint8_t *p, size_t n);
 void v8_instantiate_module(struct State *pst, const uint8_t *p, size_t n);
 void v8_module_namespace(struct State *pst, const uint8_t *p, size_t n);
 void v8_module_status(struct State *pst, const uint8_t *p, size_t n);

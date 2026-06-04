@@ -2162,4 +2162,174 @@ class MiniRacerTest < Minitest::Test
     100.times {|i| ctx.compile_module("export const v#{i} = #{i}", filename: "m#{i}.js") }
     ctx.dispose
   end
+
+  # ---- load_module_graph (batched ESM graph load) ----
+
+  # Resolves "./x.js" against any referrer to "/x.js"; serves from a source map.
+  def graph_loader(sources, fetch_calls: nil, resolve_calls: nil)
+    fetch = lambda do |urls|
+      fetch_calls << urls if fetch_calls
+      urls.map {|u| (s = sources[u]) ? [s, nil] : nil }
+    end
+    resolve = lambda do |edges|
+      resolve_calls << edges if resolve_calls
+      edges.map {|specifier, _referrer| specifier.start_with?("./") ? "/#{specifier[2..]}" : specifier }
+    end
+    [resolve, fetch]
+  end
+
+  def test_load_module_graph_evaluates_whole_graph
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    sources = {
+      "/app.js" => 'import {a} from "./a.js"; import {b} from "./b.js"; globalThis.RESULT = a + b;',
+      "/a.js"   => 'import {c} from "./c.js"; export const a = c + 1;',
+      "/b.js"   => "export const b = 20;",
+      "/c.js"   => "export const c = 100;",
+    }
+    resolve, fetch = graph_loader(sources)
+    result = ctx.load_module_graph("/app.js", resolve: resolve, fetch_batch: fetch)
+
+    assert_equal(121, ctx.eval("globalThis.RESULT"))
+    assert_equal(%w[/a.js /app.js /b.js /c.js], result[:modules].map {|m| m[:url] }.sort)
+    assert_equal([false], result[:modules].map {|m| m[:cache_rejected] }.uniq)
+  end
+
+  def test_load_module_graph_batches_callbacks_per_level
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    sources = {
+      "/app.js" => 'import {a} from "./a.js"; import {b} from "./b.js";',
+      "/a.js"   => 'import {c} from "./c.js"; export const a = 1;',
+      "/b.js"   => "export const b = 2;",
+      "/c.js"   => "export const c = 3;",
+    }
+    fetch_calls = []
+    resolve_calls = []
+    resolve, fetch = graph_loader(sources, fetch_calls: fetch_calls, resolve_calls: resolve_calls)
+    ctx.load_module_graph("/app.js", resolve: resolve, fetch_batch: fetch)
+
+    # 4 modules + 3 imports would be 7 crossings one-at-a-time; batched per graph
+    # level it is 3 fetch + 2 resolve = 5, and the second fetch carries 2 URLs.
+    assert_equal(3, fetch_calls.size)
+    assert_equal(2, resolve_calls.size)
+    assert_includes(fetch_calls, %w[/a.js /b.js])
+  end
+
+  def test_load_module_graph_populates_import_meta_url
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    resolve, fetch = graph_loader({ "/m.js" => "globalThis.META = import.meta.url; export const x = 1;" })
+    ctx.load_module_graph("/m.js", resolve: resolve, fetch_batch: fetch)
+    assert_equal("/m.js", ctx.eval("globalThis.META"))
+  end
+
+  def test_load_module_graph_missing_dependency_fails_gracefully
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    # fetch returns nil for the (resolved) missing dependency.
+    resolve, fetch = graph_loader({ "/e.js" => 'import {z} from "./missing.js"; export const y = z;' })
+    assert_raises(MiniRacer::RuntimeError) do
+      ctx.load_module_graph("/e.js", resolve: resolve, fetch_batch: fetch)
+    end
+    # The context must remain usable after a failed graph load.
+    assert_equal(2, ctx.eval("1 + 1"))
+  end
+
+  def test_load_module_graph_consumes_cached_data
+    skip_on_truffleruby_module
+    body = "export const v = 42;"
+    cache = MiniRacer::Context.new.compile_module(body, filename: "/v.js", produce_cache: true).cached_data
+    refute_nil(cache)
+
+    ctx = MiniRacer::Context.new
+    result = ctx.load_module_graph("/v.js",
+      resolve: ->(edges) { edges.map { nil } },
+      fetch_batch: ->(urls) { urls.map {|u| u == "/v.js" ? [body, cache] : nil } })
+    # A matching code cache is accepted (not rejected), so csim's cross-process
+    # bytecode cache keeps working through the batched path.
+    refute(result[:modules][0][:cache_rejected])
+  end
+
+  def test_load_module_graph_reports_rejected_cache
+    skip_on_truffleruby_module
+    # A code cache produced for one source is rejected when consumed against a
+    # different source (the cross-process-cache version/content mismatch case).
+    stale = MiniRacer::Context.new.compile_module("export const v = 1;",
+                                                  filename: "/v.js", produce_cache: true).cached_data
+    ctx = MiniRacer::Context.new
+    result = ctx.load_module_graph("/v.js",
+      resolve: ->(edges) { edges.map { nil } },
+      fetch_batch: ->(urls) { urls.map { ["export const somethingElse = 2;", stale] } })
+    assert(result[:modules][0][:cache_rejected])
+  end
+
+  def test_load_module_graph_propagates_callback_exception
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    boom = Class.new(StandardError)
+    assert_raises(boom) do
+      ctx.load_module_graph("/x.js",
+        resolve: ->(_e) { [] },
+        fetch_batch: ->(_u) { raise boom, "fetch failed" })
+    end
+    assert_equal(2, ctx.eval("1 + 1"))
+  end
+
+  def test_load_module_graph_requires_callables
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    assert_raises(ArgumentError) { ctx.load_module_graph("/x.js", resolve: nil, fetch_batch: ->(u) { [] }) }
+    assert_raises(ArgumentError) { ctx.load_module_graph("/x.js", resolve: ->(e) { [] }, fetch_batch: nil) }
+  end
+
+  def test_load_module_graph_handles_cyclic_imports
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    # a.js <-> b.js form a legal ES module cycle.
+    sources = {
+      "/a.js" => 'import {fromB} from "./b.js"; export const fromA = "A"; globalThis.SEEN = (globalThis.SEEN || "") + "a";',
+      "/b.js" => 'import {fromA} from "./a.js"; export const fromB = "B"; globalThis.SEEN = (globalThis.SEEN || "") + "b";',
+    }
+    resolve, fetch = graph_loader(sources)
+    result = ctx.load_module_graph("/a.js", resolve: resolve, fetch_batch: fetch)
+    # Each module compiled/evaluated exactly once despite the cycle.
+    assert_equal(%w[/a.js /b.js], result[:modules].map {|m| m[:url] }.sort)
+    assert_equal("ba", ctx.eval("globalThis.SEEN"))
+  end
+
+  def test_load_module_graph_fetches_shared_dependency_once
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    # Diamond: app -> {left, right} -> shared. shared must be fetched once.
+    sources = {
+      "/app.js"    => 'import "./left.js"; import "./right.js";',
+      "/left.js"   => 'import "./shared.js"; export const l = 1;',
+      "/right.js"  => 'import "./shared.js"; export const r = 2;',
+      "/shared.js" => "globalThis.SHARED = (globalThis.SHARED || 0) + 1;",
+    }
+    fetch_calls = []
+    resolve, fetch = graph_loader(sources, fetch_calls: fetch_calls)
+    result = ctx.load_module_graph("/app.js", resolve: resolve, fetch_batch: fetch)
+
+    assert_equal(1, ctx.eval("globalThis.SHARED")) # evaluated once
+    assert_equal(1, result[:modules].count {|m| m[:url] == "/shared.js" }) # listed once
+    assert_equal(1, fetch_calls.flatten.count("/shared.js")) # fetched once
+  end
+
+  def test_load_module_graph_refuses_reset_realm_from_callback
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    # reset_realm during a fetch/resolve callback would tear the realm out from
+    # under the in-flight graph load; in_callback must make it refuse.
+    fetch = lambda do |urls|
+      ctx.reset_realm
+      urls.map { nil }
+    end
+    error = assert_raises(MiniRacer::RuntimeError) do
+      ctx.load_module_graph("/x.js", resolve: ->(e) { [] }, fetch_batch: fetch)
+    end
+    assert_match(/within a host function callback/, error.message)
+    assert_equal(2, ctx.eval("1 + 1"))
+  end
 end

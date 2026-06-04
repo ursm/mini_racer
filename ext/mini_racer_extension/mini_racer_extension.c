@@ -146,6 +146,11 @@ typedef struct Context
     // Callable for `import(...)` in JS, or Qnil to reject dynamic imports
     // with a clear error. Set via Context#dynamic_import_resolver=.
     VALUE dynamic_import_resolver;
+    // Per-load_module_graph batched callbacks, Qnil when no load is active.
+    // Saved/restored via rb_ensure (like resolve_block) so nested loads and
+    // exceptions keep the slots consistent.
+    VALUE graph_resolve_block; // ->(edges)  { [url|nil, ...] }
+    VALUE graph_fetch_block;   // ->(urls)   { [[source, cached_data]|nil, ...] }
     Buf req, res;      // ruby->v8 request/response, mediated by |mtx| and |cv|
     Buf snapshot;
     Buf host_namespace; // NUL-terminated global name to install host helpers on, or empty
@@ -883,6 +888,7 @@ static void dispatch1(Context *c, const uint8_t *p, size_t n)
     case 'D': return v8_dispose_script(c->pst, p+1, n-1);
     case 'E': return v8_timedwait(c, p+1, n-1, v8_eval);
     case 'F': return v8_reset_realm(c->pst);                // (F)resh realm
+    case 'G': return v8_timedwait(c, p+1, n-1, v8_load_module_graph); // (G)raph load
     case 'H': return v8_heap_snapshot(c->pst);
     case 'I': return v8_timedwait(c, p+1, n-1, v8_instantiate_module); // (I)nstantiate module
     case 'K': return v8_timedwait(c, p+1, n-1, v8_compile); // (K)ompile — 'C' is taken
@@ -1234,6 +1240,118 @@ fail:
     goto out;
 }
 
+// load_module_graph batched fetch ('f') and resolve ('r') callbacks. Each
+// deserializes the batch v8 sent, calls the per-load Ruby block, and serializes
+// the array reply back under the same marker. Mirrors rendezvous_resolve.
+
+// called with |rr_mtx| and GVL held; can raise exception
+static VALUE rendezvous_graph_fetch_do(VALUE arg)
+{
+    struct rendezvous_nogvl *a = (void *)arg;
+    Context *c = a->context;
+    Buf *b = a->res;
+    DesCtx d;
+    VALUE urls;
+
+    assert(b->len > 0 && *b->buf == 'f');
+    DesCtx_init(&d);
+    urls = deserialize1(&d, b->buf+1, b->len-1); // skip 'f' marker; [url, ...]
+    if (NIL_P(c->graph_fetch_block))
+        rb_raise(runtime_error, "module fetch requested but no fetch_batch block is active");
+    // -> [[source, cached_data]|nil, ...]
+    VALUE ret = rb_funcall(c->graph_fetch_block, rb_intern("call"), 1, urls);
+    // The cached_data element is an ASCII-8BIT String (same shape as
+    // Module#cached_data / compile_module(cached_data:)). Wrap it as
+    // MiniRacer::Binary so it crosses to V8 as a Uint8Array — a bare String
+    // would serialize as a JS string and the code cache would be silently
+    // dropped (and binary bytes mangled by UTF-8). Build fresh rows rather than
+    // mutating the array the caller's block returned.
+    if (TYPE(ret) == T_ARRAY && !NIL_P(binary_class)) {
+        long len = RARRAY_LEN(ret), i;
+        VALUE wrapped = rb_ary_new_capa(len);
+        for (i = 0; i < len; i++) {
+            VALUE row = rb_ary_entry(ret, i);
+            if (TYPE(row) == T_ARRAY && RARRAY_LEN(row) >= 2 &&
+                TYPE(rb_ary_entry(row, 1)) == T_STRING) {
+                VALUE r2 = rb_ary_dup(row);
+                rb_ary_store(r2, 1, rb_funcall(binary_class, rb_intern("new"), 1,
+                                               rb_ary_entry(row, 1)));
+                rb_ary_push(wrapped, r2);
+            } else {
+                rb_ary_push(wrapped, row);
+            }
+        }
+        ret = wrapped;
+    }
+    return ret;
+}
+
+// called with |rr_mtx| and GVL held; can raise exception
+static VALUE rendezvous_graph_resolve_do(VALUE arg)
+{
+    struct rendezvous_nogvl *a = (void *)arg;
+    Context *c = a->context;
+    Buf *b = a->res;
+    DesCtx d;
+    VALUE edges;
+
+    assert(b->len > 0 && *b->buf == 'r');
+    DesCtx_init(&d);
+    edges = deserialize1(&d, b->buf+1, b->len-1); // skip 'r' marker; [[spec, ref], ...]
+    if (NIL_P(c->graph_resolve_block))
+        rb_raise(runtime_error, "module resolve requested but no resolve block is active");
+    // -> [url|nil, ...]
+    return rb_funcall(c->graph_resolve_block, rb_intern("call"), 1, edges);
+}
+
+// called with |rr_mtx| and GVL held; |mtx| is unlocked
+// batch data is in |a->res| (marker |marker|), serialized array reply in |a->req|
+static void rendezvous_graph_batch(struct rendezvous_nogvl *a, char marker,
+                                   VALUE (*body)(VALUE))
+{
+    const char *err;
+    Context *c = a->context;
+    int exc;
+    VALUE r;
+    Ser s;
+
+    r = rb_protect(body, (VALUE)a, &exc);
+    if (exc) {
+        c->exception = rb_errinfo();
+        rb_set_errinfo(Qnil);
+        goto fail;
+    }
+    ser_init1(&s, (uint8_t)marker); // reply matches request marker
+    if (serialize(&s, r)) {
+        c->exception = rb_exc_new_cstr(internal_error, s.err);
+        ser_reset(&s);
+        goto fail;
+    }
+out:
+    buf_move(&s.b, a->req);
+    return;
+fail:
+    ser_init0(&s);
+    w_byte(&s, 'e');
+    r = rb_funcall(c->exception, rb_intern("to_s"), 0);
+    err = StringValueCStr(r);
+    if (err)
+        w(&s, err, strlen(err));
+    goto out;
+}
+
+static void *rendezvous_graph_fetch(void *arg)
+{
+    rendezvous_graph_batch(arg, 'f', rendezvous_graph_fetch_do);
+    return NULL;
+}
+
+static void *rendezvous_graph_resolve(void *arg)
+{
+    rendezvous_graph_batch(arg, 'r', rendezvous_graph_resolve_do);
+    return NULL;
+}
+
 static void *single_threaded_runner(void *arg)
 {
     Context *c;
@@ -1311,6 +1429,16 @@ next:
     }
     if (*a->res->buf == 'd') { // dynamic import() request?
         rb_thread_call_with_gvl(rendezvous_dynamic_import, a);
+        buf_reset(a->res);
+        goto next;
+    }
+    if (*a->res->buf == 'f') { // load_module_graph fetch batch?
+        rb_thread_call_with_gvl(rendezvous_graph_fetch, a);
+        buf_reset(a->res);
+        goto next;
+    }
+    if (*a->res->buf == 'r') { // load_module_graph resolve batch?
+        rb_thread_call_with_gvl(rendezvous_graph_resolve, a);
         buf_reset(a->res);
         goto next;
     }
@@ -1431,6 +1559,8 @@ static VALUE context_alloc(VALUE klass)
     c->exception = Qnil;
     c->resolve_block = Qnil;
     c->dynamic_import_resolver = Qnil;
+    c->graph_resolve_block = Qnil;
+    c->graph_fetch_block = Qnil;
     c->procs = rb_ary_new();
     buf_init(&c->snapshot);
     buf_init(&c->host_namespace);
@@ -1567,6 +1697,8 @@ static void context_mark(void *arg)
     rb_gc_mark(c->exception);
     rb_gc_mark(c->resolve_block);
     rb_gc_mark(c->dynamic_import_resolver);
+    rb_gc_mark(c->graph_resolve_block);
+    rb_gc_mark(c->graph_fetch_block);
 }
 
 static size_t context_size(const void *arg)
@@ -2477,6 +2609,100 @@ static VALUE module_instantiate(VALUE self)
     return self;
 }
 
+struct load_graph_args {
+    Context *c;
+    VALUE    entry_url;
+    VALUE    prev_resolve;
+    VALUE    prev_fetch;
+};
+
+static VALUE context_load_module_graph_body(VALUE arg)
+{
+    struct load_graph_args *la = (struct load_graph_args *)arg;
+    VALUE a, e, result, value, mods, out;
+    long i, len;
+    Ser s;
+
+    // request is (G)raph, [entry_url]
+    ser_init1(&s, 'G');
+    ser_array_begin(&s, 1);
+    add_string(&s, la->entry_url);
+    ser_array_end(&s, 1);
+    a = rendezvous(la->c, &s.b); // takes ownership of |s.b|
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    result = rb_ary_pop(a); // [value, [[url, cache_rejected], ...]]
+    Check_Type(result, T_ARRAY);
+    value = rb_ary_entry(result, 0);
+    mods  = rb_ary_entry(result, 1);
+    Check_Type(mods, T_ARRAY);
+
+    len = RARRAY_LEN(mods);
+    out = rb_ary_new_capa(len);
+    for (i = 0; i < len; i++) {
+        VALUE row = rb_ary_entry(mods, i), h = rb_hash_new();
+        rb_hash_aset(h, ID2SYM(rb_intern("url")),            rb_ary_entry(row, 0));
+        rb_hash_aset(h, ID2SYM(rb_intern("cache_rejected")), rb_ary_entry(row, 1));
+        rb_ary_push(out, h);
+    }
+    {
+        VALUE h = rb_hash_new();
+        rb_hash_aset(h, ID2SYM(rb_intern("value")),   value);
+        rb_hash_aset(h, ID2SYM(rb_intern("modules")), out);
+        return h;
+    }
+}
+
+static VALUE context_load_module_graph_restore(VALUE arg)
+{
+    struct load_graph_args *la = (struct load_graph_args *)arg;
+    la->c->graph_resolve_block = la->prev_resolve;
+    la->c->graph_fetch_block   = la->prev_fetch;
+    return Qnil;
+}
+
+// EXPERIMENTAL (spike): compile+instantiate+evaluate an entire ES module graph
+// reachable from |entry_url| in one call, driving the walk on the V8 thread.
+// resolve:/fetch_batch: are invoked in batches (once per graph level) instead of
+// once per module/import, collapsing the ~2*N Ruby<->V8 round-trips of the
+// compile_module + instantiate path to ~2 per level.
+//   resolve:     ->(edges) { edges.map { |specifier, referrer| url_or_nil } }
+//   fetch_batch: ->(urls)  { urls.map  { |u| [source, cached_data] | nil } }
+// Returns { value:, modules: [{ url:, cache_rejected: }, ...] }.
+static VALUE context_load_module_graph(int argc, VALUE *argv, VALUE self)
+{
+    VALUE entry_url, kwargs, resolve, fetch_batch;
+    Context *c;
+    struct load_graph_args la;
+
+    TypedData_Get_Struct(self, Context, &context_type, c);
+    if (atomic_load(&c->quit))
+        rb_raise(context_disposed_error, "disposed context");
+    rb_scan_args(argc, argv, "1:", &entry_url, &kwargs);
+    Check_Type(entry_url, T_STRING);
+    resolve = fetch_batch = Qnil;
+    if (!NIL_P(kwargs)) {
+        resolve     = rb_hash_aref(kwargs, ID2SYM(rb_intern("resolve")));
+        fetch_batch = rb_hash_aref(kwargs, ID2SYM(rb_intern("fetch_batch")));
+    }
+    if (!rb_respond_to(resolve, rb_intern("call")))
+        rb_raise(rb_eArgError, "load_module_graph requires a resolve: callable");
+    if (!rb_respond_to(fetch_batch, rb_intern("call")))
+        rb_raise(rb_eArgError, "load_module_graph requires a fetch_batch: callable");
+
+    // Save/restore the slots (rb_ensure) so a nested load from inside a batch
+    // callback, or an exception, leaves them consistent — same pattern as
+    // Module#instantiate's resolve_block.
+    la.c = c;
+    la.entry_url = entry_url;
+    la.prev_resolve = c->graph_resolve_block;
+    la.prev_fetch   = c->graph_fetch_block;
+    c->graph_resolve_block = resolve;
+    c->graph_fetch_block   = fetch_batch;
+    return rb_ensure(context_load_module_graph_body, (VALUE)&la,
+                     context_load_module_graph_restore, (VALUE)&la);
+}
+
 static VALUE module_evaluate(VALUE self)
 {
     VALUE a, e;
@@ -2626,6 +2852,7 @@ void Init_mini_racer_extension(void)
     rb_define_method(c, "attach", context_attach, 2);
     rb_define_method(c, "compile", context_compile, -1);
     rb_define_method(c, "compile_module", context_compile_module, -1);
+    rb_define_method(c, "load_module_graph", context_load_module_graph, -1);
     rb_define_method(c, "dispose", context_dispose, 0);
     rb_define_method(c, "stop", context_stop, 0);
     rb_define_method(c, "call", context_call, -1);
