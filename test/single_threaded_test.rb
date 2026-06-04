@@ -190,6 +190,22 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     RUBY
   end
 
+  def test_load_module_graph_dynamic_import_identity
+    # Dynamic import after a graph load does nested resolve/fetch round-trips on
+    # the shared Ruby thread; a rendezvous regression would deadlock here.
+    assert_single_threaded_script <<~'RUBY'
+      context = MiniRacer::Context.new
+      sources = {
+        "/entry.js" => 'import {s} from "./shared.js"; s.n = 42; globalThis.OUT = "pending"; import("./shared.js").then(m => { globalThis.OUT = m.s.n; });',
+        "/shared.js" => "export const s = { n: 0 };",
+      }
+      resolve = ->(edges) { edges.map { |spec, _ref| "/" + spec.sub(%r{\A\./}, "") } }
+      fetch   = ->(urls)  { urls.map  { |u| (src = sources[u]) ? [src, nil] : nil } }
+      context.load_module_graph("/entry.js", resolve: resolve, fetch_batch: fetch)
+      raise "dynamic import did not reuse the loaded module" unless context.eval("globalThis.OUT") == 42
+    RUBY
+  end
+
   def test_host_namespace_drain_microtasks
     # The native checkpoint runs inline on the isolate thread and must not take
     # a v8::Locker, which would deadlock when V8 shares the Ruby thread.

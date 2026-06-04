@@ -2317,6 +2317,88 @@ class MiniRacerTest < Minitest::Test
     assert_equal(1, fetch_calls.flatten.count("/shared.js")) # fetched once
   end
 
+  def test_load_module_graph_dynamic_import_reuses_loaded_module
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    # The entry statically imports shared and mutates it; a later dynamic
+    # import() of the same URL must see the SAME Module instance (n == 42), not
+    # a freshly recompiled one (n == 0). This is the identity contract.
+    sources = {
+      "/entry.js" => <<~JS,
+        import {state} from "./shared.js";
+        state.n = 42;
+        globalThis.OUT = "pending";
+        import("./shared.js").then(m => { globalThis.OUT = m.state.n; });
+      JS
+      "/shared.js" => "export const state = { n: 0 };",
+    }
+    fetch_calls = []
+    resolve, fetch = graph_loader(sources, fetch_calls: fetch_calls)
+    ctx.load_module_graph("/entry.js", resolve: resolve, fetch_batch: fetch)
+
+    assert_equal(42, ctx.eval("globalThis.OUT"))
+    # shared.js was fetched once (the dynamic import reused it, no re-fetch).
+    assert_equal(1, fetch_calls.flatten.count("/shared.js"))
+  end
+
+  def test_load_module_graph_dynamic_import_loads_new_subgraph
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    # lazy.js is not in the static graph; the runtime dynamic import must walk
+    # and load it on demand via the persisted fetch/resolve callbacks.
+    sources = {
+      "/entry.js" => <<~JS,
+        globalThis.OUT = "pending";
+        import("./lazy.js").then(m => { globalThis.OUT = m.value; });
+      JS
+      "/lazy.js" => "export const value = 99;",
+    }
+    resolve, fetch = graph_loader(sources)
+    ctx.load_module_graph("/entry.js", resolve: resolve, fetch_batch: fetch)
+    assert_equal(99, ctx.eval("globalThis.OUT"))
+  end
+
+  def test_load_module_graph_relists_only_newly_compiled_modules
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    sources = {
+      "/a.js"      => 'import "./shared.js"; export const a = 1;',
+      "/b.js"      => 'import "./shared.js"; export const b = 2;',
+      "/shared.js" => "globalThis.S = (globalThis.S || 0) + 1;",
+    }
+    resolve, fetch = graph_loader(sources)
+    r1 = ctx.load_module_graph("/a.js", resolve: resolve, fetch_batch: fetch)
+    r2 = ctx.load_module_graph("/b.js", resolve: resolve, fetch_batch: fetch)
+
+    assert_includes(r1[:modules].map {|m| m[:url] }, "/shared.js")
+    # The second load reuses the already-registered /shared.js: not relisted and
+    # not re-evaluated (S stays 1), so it is the same instance.
+    assert_equal(%w[/b.js], r2[:modules].map {|m| m[:url] })
+    assert_equal(1, ctx.eval("globalThis.S"))
+  end
+
+  def test_load_module_graph_rolls_back_a_failed_load
+    skip_on_truffleruby_module
+    ctx = MiniRacer::Context.new
+    full = {
+      "/entry.js" => 'import {x} from "./dep.js"; globalThis.X = x;',
+      "/dep.js"   => "export const x = 7;",
+    }
+    available = { "/entry.js" => full["/entry.js"] } # dep missing on the first try
+    resolve = ->(edges) { edges.map {|spec, _ref| "/#{spec.sub(%r{\A\./}, "")}" } }
+    fetch   = ->(urls)  { urls.map  {|u| (s = available[u]) ? [s, nil] : nil } }
+
+    # First load fails: /dep.js 404s, so /entry.js can't be instantiated.
+    assert_raises(MiniRacer::RuntimeError) do
+      ctx.load_module_graph("/entry.js", resolve: resolve, fetch_batch: fetch)
+    end
+    # The failed load must not leave a half-loaded /entry.js in the registry: with
+    # the dependency now available, a retry recompiles cleanly and succeeds.
+    available["/dep.js"] = full["/dep.js"]
+    ctx.load_module_graph("/entry.js", resolve: resolve, fetch_batch: fetch)
+    assert_equal(7, ctx.eval("globalThis.X"))
+  end
+
   def test_load_module_graph_refuses_reset_realm_from_callback
     skip_on_truffleruby_module
     ctx = MiniRacer::Context.new

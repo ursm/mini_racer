@@ -87,14 +87,12 @@ struct ModuleEntry
     std::string filename;
 };
 
-// Transient per-call state for v8_load_module_graph, reachable from
-// graph_resolve_callback (which has no embedder slot) via State::active_graph.
-// Locals are valid for the whole call: the function's HandleScope spans every
-// fetch/resolve round-trip.
+// Transient per-load resolution map, reachable from graph_resolve_callback
+// (which has no embedder slot) via State::active_graph. The modules themselves
+// live in the persistent URL registry (State::module_id_by_url); this only
+// records how each import edge resolved during the walk.
 struct GraphLoad
 {
-    // url -> compiled module
-    std::unordered_map<std::string, v8::Local<v8::Module>> by_url;
     // referrer_url '\0' specifier -> resolved url ("" = embedder returned nil)
     std::unordered_map<std::string, std::string> edges;
 };
@@ -142,6 +140,15 @@ struct State
     // Persistent used for scripts.
     std::unordered_map<int32_t, std::unique_ptr<ModuleEntry>> modules;
     int32_t next_module_id;
+    // Context-persistent "1 URL = 1 Module" registry: url -> id into `modules`.
+    // Populated by load_module_graph and by registry-backed dynamic import, so
+    // every load path that touches a URL shares one Module instance for the
+    // life of the realm. Cleared with `modules` on reset_realm / teardown.
+    std::unordered_map<std::string, int32_t> module_id_by_url;
+    // True once load_module_graph has run: routes dynamic import() through the
+    // URL registry + the persisted resolve/fetch_batch callbacks instead of the
+    // legacy per-import dynamic_import_resolver.
+    bool uses_graph_loader;
     // Depth counter incremented while v8_api_callback is on the stack.
     // CreateCodeCache walks live isolate state and corrupts the parser
     // when invoked from within a JS->Ruby->JS frame; see compile()'s
@@ -375,7 +382,12 @@ void v8_gc_callback(v8::Isolate*, v8::GCType, v8::GCCallbackFlags, void *data)
 
 // Linear scan of st.modules to map a Local<Module> back to the filename
 // captured at compile time. Returns empty string if the module isn't ours
-// (shouldn't happen — all live modules come from v8_compile_module).
+// (shouldn't happen — all live modules come from v8_compile_module /
+// load_module_graph). st.modules holds every module for the realm's lifetime
+// (reset_realm/teardown is the only reclaim point), so this scan is O(N) in the
+// realm's module count; fine for the per-visit-fresh-realm model (N is a single
+// page's graph), but a reverse index would be needed for a long-lived realm that
+// lazily imports many modules.
 static const std::string& module_filename(State& st, v8::Local<v8::Module> mod)
 {
     static const std::string empty;
@@ -396,6 +408,21 @@ struct CallbackGuard {
     CallbackGuard(State &s) : st(s) { st.in_callback++; }
     ~CallbackGuard()                { st.in_callback--; }
 };
+
+// Forward declarations for the URL-registry module loader (defined below,
+// alongside load_module_graph). Used by the registry-backed dynamic import path.
+static v8::Local<v8::Module> registry_lookup(State& st, const std::string& url);
+static void registry_rollback(State& st, const std::vector<std::string>& urls);
+static bool graph_str(State& st, const std::string& s, v8::Local<v8::String>* out);
+static bool graph_roundtrip(State& st, char marker, v8::Local<v8::Value> request,
+                            v8::Local<v8::Value>* reply_out);
+static bool walk_module_graph(State& st, const std::string& entry_url,
+                              std::unordered_map<std::string, std::string>& edges,
+                              std::vector<std::string>& new_urls,
+                              std::unordered_map<std::string, bool>& rejected_by_url);
+static v8::MaybeLocal<v8::Module> graph_resolve_callback(
+    v8::Local<v8::Context> context, v8::Local<v8::String> specifier,
+    v8::Local<v8::FixedArray> import_assertions, v8::Local<v8::Module> referrer);
 
 // V8 calls this for every JS `import(...)` expression. We rendezvous to
 // Ruby (marker 'd'), expect a fully-instantiated MiniRacer::Module back,
@@ -434,58 +461,143 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
         return reject_with_value(v8::Exception::Error(msg));
     };
 
-    v8::Local<v8::Array> request;
-    {
-        v8::Context::Scope context_scope(st.safe_context);
-        request = v8::Array::New(st.isolate, 2);
-    }
-    request->Set(context, 0, specifier).Check();
-    // resource_name is the referrer's filename for module-initiated imports,
-    // or the script filename for eval-initiated ones. May be Undefined for
-    // ad-hoc compilations; coerce to empty string in that case.
-    v8::Local<v8::Value> ref = resource_name->IsString()
-        ? resource_name
-        : v8::Local<v8::Value>::Cast(v8::String::Empty(st.isolate));
-    request->Set(context, 1, ref).Check();
+    v8::Local<v8::Module> module;
 
-    {
-        Serialized serialized(st, request);
-        if (!serialized.data)
-            return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
-                "could not serialize dynamic import request"));
-        uint8_t marker = 'd';
-        v8_reply(st.ruby_context, &marker, 1);
-        v8_reply(st.ruby_context, serialized.data, serialized.size);
-    }
+    if (st.uses_graph_loader) {
+        // Registry path: resolve the specifier to a URL via the persisted
+        // resolve callback, reuse the registry's Module if the URL was already
+        // loaded (the identity fix), else walk + instantiate its subgraph. A
+        // local TryCatch turns fetch/resolve/compile failures into a rejected
+        // import() promise instead of leaving an exception pending.
+        v8::TryCatch tc(st.isolate);
+        tc.SetVerbose(st.verbose_exceptions);
+        auto reject_pending = [&] {
+            v8::Local<v8::Value> reason = tc.HasCaught()
+                ? tc.Exception()
+                : v8::Local<v8::Value>::Cast(v8::Exception::Error(
+                      v8::String::NewFromUtf8Literal(isolate, "dynamic import failed")));
+            // Clear so the captured Ruby error (if any) is reported via the
+            // promise, not re-raised in the enclosing eval frame.
+            st.ruby_exception.Reset();
+            return reject_with_value(reason);
+        };
 
-    const uint8_t *p;
-    size_t n;
-    for (;;) {
-        v8_roundtrip(st.ruby_context, &p, &n);
-        if (*p == 'd') break;
-        if (*p == 'e') {
-            v8::Local<v8::String> message;
-            auto type = v8::NewStringType::kNormal;
-            if (!v8::String::NewFromOneByte(st.isolate, p+1, type, n-1).ToLocal(&message))
-                message = v8::String::NewFromUtf8Literal(st.isolate, "Ruby exception");
-            return reject_with_literal(message);
+        std::string ref_url;
+        if (resource_name->IsString()) {
+            v8::String::Utf8Value ru(st.isolate, resource_name);
+            if (*ru) ref_url.assign(*ru, ru.length());
         }
-        v8_dispatch(st.ruby_context);
-    }
+        // Single-edge resolve batch: [[specifier, referrer_url]].
+        v8::Local<v8::Array> edges_arr, pr;
+        {
+            v8::Context::Scope cs(st.safe_context);
+            edges_arr = v8::Array::New(st.isolate, 1);
+            pr = v8::Array::New(st.isolate, 2);
+        }
+        v8::Local<v8::String> refs;
+        if (!graph_str(st, ref_url, &refs)) refs = v8::String::Empty(st.isolate);
+        pr->Set(context, 0, specifier).Check();
+        pr->Set(context, 1, refs).Check();
+        edges_arr->Set(context, 0, pr).Check();
+        v8::Local<v8::Value> resolved_v;
+        if (!graph_roundtrip(st, 'r', edges_arr, &resolved_v)) return reject_pending();
+        std::string url;
+        if (resolved_v->IsArray()) {
+            v8::Local<v8::Value> u;
+            if (resolved_v.As<v8::Array>()->Get(context, 0).ToLocal(&u) && u->IsString()) {
+                v8::String::Utf8Value uu(st.isolate, u);
+                if (*uu) url.assign(*uu, uu.length());
+            }
+        }
+        if (url.empty())
+            return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
+                "dynamic import specifier could not be resolved to a URL"));
 
-    v8::ValueDeserializer des(st.isolate, p+1, n-1);
-    des.ReadHeader(st.context).Check();
-    v8::Local<v8::Value> id_v;
-    int32_t id;
-    if (!des.ReadValue(st.context).ToLocal(&id_v) ||
-        !id_v->Int32Value(st.context).To(&id))
-        return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
-            "dynamic import reply could not be decoded"));
-    auto it = st.modules.find(id);
-    if (it == st.modules.end())
-        return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
-            "dynamic import resolver returned a handle unknown to this Context"));
-    auto module = v8::Local<v8::Module>::New(st.isolate, it->second->handle);
+        module = registry_lookup(st, url);
+        if (module.IsEmpty()) {
+            // Miss: load the not-yet-registered subgraph reachable from url,
+            // then instantiate (the shared tail below evaluates + resolves). On
+            // failure roll back what this walk registered so a retry recompiles
+            // cleanly. active_graph is save/restored (a dynamic import may itself
+            // fire inside an enclosing load's Evaluate).
+            GraphLoad graph;
+            std::vector<std::string> new_urls;
+            std::unordered_map<std::string, bool> rejected_by_url;
+            if (!walk_module_graph(st, url, graph.edges, new_urls, rejected_by_url)) {
+                registry_rollback(st, new_urls);
+                return reject_pending();
+            }
+            module = registry_lookup(st, url);
+            if (module.IsEmpty()) {
+                registry_rollback(st, new_urls);
+                return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
+                    "dynamic import target could not be fetched"));
+            }
+            GraphLoad *prev = st.active_graph;
+            st.active_graph = &graph;
+            v8::Maybe<bool> ok = module->InstantiateModule(st.context, graph_resolve_callback);
+            st.active_graph = prev;
+            if (ok.IsNothing() || !ok.FromJust()) {
+                registry_rollback(st, new_urls);
+                return reject_pending();
+            }
+        }
+    } else {
+        // Legacy path: the embedder's dynamic_import_resolver returns a
+        // fully-instantiated MiniRacer::Module (looked up by handle id).
+        v8::Local<v8::Array> request;
+        {
+            v8::Context::Scope context_scope(st.safe_context);
+            request = v8::Array::New(st.isolate, 2);
+        }
+        request->Set(context, 0, specifier).Check();
+        // resource_name is the referrer's filename for module-initiated imports,
+        // or the script filename for eval-initiated ones. May be Undefined for
+        // ad-hoc compilations; coerce to empty string in that case.
+        v8::Local<v8::Value> ref = resource_name->IsString()
+            ? resource_name
+            : v8::Local<v8::Value>::Cast(v8::String::Empty(st.isolate));
+        request->Set(context, 1, ref).Check();
+
+        {
+            Serialized serialized(st, request);
+            if (!serialized.data)
+                return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
+                    "could not serialize dynamic import request"));
+            uint8_t marker = 'd';
+            v8_reply(st.ruby_context, &marker, 1);
+            v8_reply(st.ruby_context, serialized.data, serialized.size);
+        }
+
+        const uint8_t *p;
+        size_t n;
+        for (;;) {
+            v8_roundtrip(st.ruby_context, &p, &n);
+            if (*p == 'd') break;
+            if (*p == 'e') {
+                v8::Local<v8::String> message;
+                auto type = v8::NewStringType::kNormal;
+                if (!v8::String::NewFromOneByte(st.isolate, p+1, type, n-1).ToLocal(&message))
+                    message = v8::String::NewFromUtf8Literal(st.isolate, "Ruby exception");
+                return reject_with_literal(message);
+            }
+            v8_dispatch(st.ruby_context);
+        }
+
+        v8::ValueDeserializer des(st.isolate, p+1, n-1);
+        des.ReadHeader(st.context).Check();
+        v8::Local<v8::Value> id_v;
+        int32_t id;
+        if (!des.ReadValue(st.context).ToLocal(&id_v) ||
+            !id_v->Int32Value(st.context).To(&id))
+            return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
+                "dynamic import reply could not be decoded"));
+        auto it = st.modules.find(id);
+        if (it == st.modules.end())
+            return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
+                "dynamic import resolver returned a handle unknown to this Context"));
+        module = v8::Local<v8::Module>::New(st.isolate, it->second->handle);
+    }
 
     auto status = module->GetStatus();
     // The Ruby resolver must hand back a Module that's at least instantiated;
@@ -534,24 +646,18 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
     return escape();
 }
 
-static const std::string *graph_url_of(GraphLoad& g, v8::Local<v8::Module> module);
-
 // V8 calls this the first time JS reads `import.meta` for a module.
 // Populate the `url` property with the filename passed to compile_module
 // — needed for relative resolution helpers like `new URL(spec, import.meta.url)`.
+// Graph/dynamic-import modules are registered in st.modules with filename=url,
+// so module_filename resolves them too.
 static void init_import_meta_object(v8::Local<v8::Context> context,
                                     v8::Local<v8::Module> module,
                                     v8::Local<v8::Object> meta)
 {
     auto isolate = context->GetIsolate();
     State *pst = static_cast<State*>(isolate->GetData(0));
-    // Graph-loaded modules aren't registered in st.modules; their URL lives in
-    // the active GraphLoad (set for the whole load, including Evaluate, which is
-    // when import.meta is first read). Fall back to st.modules for modules made
-    // via compile_module.
-    const std::string *graph_url = pst->active_graph
-        ? graph_url_of(*pst->active_graph, module) : nullptr;
-    const std::string& filename = graph_url ? *graph_url : module_filename(*pst, module);
+    const std::string& filename = module_filename(*pst, module);
     // Pass the byte length explicitly: filenames may contain embedded NULs,
     // and NewFromUtf8 without a length argument truncates at the first NUL.
     v8::Local<v8::String> name;
@@ -1377,47 +1483,69 @@ static std::string edge_key(const std::string& referrer, const std::string& spec
     return k;
 }
 
-// Reverse lookup (module -> url) over the active graph. Linear, but bounded by
-// the current graph (~tens of modules) — graph modules are deliberately NOT
-// registered in st.modules, so there is no cross-call accumulation to scan and
-// no leak. Returns nullptr if the module isn't part of this graph.
-static const std::string *graph_url_of(GraphLoad& g, v8::Local<v8::Module> module)
+// URL registry: one Module instance per URL for the realm's lifetime.
+static v8::Local<v8::Module> registry_lookup(State& st, const std::string& url)
 {
-    for (auto& kv : g.by_url)
-        if (kv.second == module) return &kv.first;
-    return nullptr;
+    auto it = st.module_id_by_url.find(url);
+    if (it == st.module_id_by_url.end()) return v8::Local<v8::Module>();
+    auto m = st.modules.find(it->second);
+    if (m == st.modules.end()) return v8::Local<v8::Module>();
+    return v8::Local<v8::Module>::New(st.isolate, m->second->handle);
 }
 
-// InstantiateModule resolver for the graph load. Every edge was resolved and
-// its target compiled during the walk, so this is a pure map lookup — no Ruby
-// round-trip per import. Returns empty (throwing) for edges the embedder left
-// unresolved (resolve -> nil) or whose target failed to fetch (404); that makes
-// InstantiateModule fail on that import, matching the graceful-failure contract.
+// Register a freshly compiled module under |url| (filename=url so module_filename
+// and import.meta.url resolve it). Caller must have confirmed a registry miss.
+static void registry_register(State& st, const std::string& url, v8::Local<v8::Module> module)
+{
+    int32_t id = ++st.next_module_id;
+    auto entry = std::make_unique<ModuleEntry>();
+    entry->handle.Reset(st.isolate, module);
+    entry->filename = url;
+    st.modules[id] = std::move(entry);
+    st.module_id_by_url[url] = id;
+}
+
+// Undo registry_register for |urls| — used to roll back a load that registered
+// modules but then failed to instantiate/evaluate, so those URLs aren't left in
+// the registry as half-loaded (uninstantiated) modules that future imports would
+// reuse and reject. Only the modules a failed load itself compiled are passed in;
+// reused modules from earlier successful loads are untouched.
+static void registry_rollback(State& st, const std::vector<std::string>& urls)
+{
+    for (const std::string& url : urls) {
+        auto it = st.module_id_by_url.find(url);
+        if (it == st.module_id_by_url.end()) continue;
+        st.modules.erase(it->second);
+        st.module_id_by_url.erase(it);
+    }
+}
+
+// InstantiateModule resolver for a graph/dynamic load. Every edge was resolved
+// during the walk and its target is in the URL registry, so this is a pure map
+// lookup — no Ruby round-trip per import. Returns empty (throwing) for edges the
+// embedder left unresolved (resolve -> nil) or whose target failed to fetch
+// (404); InstantiateModule then fails on that import (ESM-correct for a missing
+// static dependency).
 static v8::MaybeLocal<v8::Module> graph_resolve_callback(
     v8::Local<v8::Context> /*context*/,
     v8::Local<v8::String> specifier,
     v8::Local<v8::FixedArray> /*import_assertions*/,
     v8::Local<v8::Module> referrer)
 {
-    State& st = *static_cast<State*>(
-        v8::Isolate::GetCurrent()->GetData(0));
+    State& st = *static_cast<State*>(v8::Isolate::GetCurrent()->GetData(0));
     auto isolate = st.isolate;
-    GraphLoad *g = st.active_graph;
-    if (g) {
-        const std::string *ref_url = graph_url_of(*g, referrer);
-        v8::String::Utf8Value spec(isolate, specifier);
-        std::string spec_s(*spec ? *spec : "", *spec ? spec.length() : 0);
-        if (ref_url) {
-            auto e = g->edges.find(edge_key(*ref_url, spec_s));
-            if (e != g->edges.end() && !e->second.empty()) {
-                auto m = g->by_url.find(e->second);
-                if (m != g->by_url.end()) return m->second;
-            }
+    v8::String::Utf8Value spec(isolate, specifier);
+    std::string spec_s(*spec ? *spec : "", *spec ? spec.length() : 0);
+    if (st.active_graph) {
+        const std::string& ref_url = module_filename(st, referrer);
+        auto e = st.active_graph->edges.find(edge_key(ref_url, spec_s));
+        if (e != st.active_graph->edges.end() && !e->second.empty()) {
+            auto m = registry_lookup(st, e->second);
+            if (!m.IsEmpty()) return m;
         }
     }
-    v8::String::Utf8Value spec(isolate, specifier);
     std::string msg = "could not resolve import \"";
-    msg.append(*spec ? *spec : "?").append("\"");
+    msg.append(spec_s).append("\"");
     v8::Local<v8::String> m;
     if (!v8::String::NewFromUtf8(isolate, msg.c_str()).ToLocal(&m))
         m = v8::String::NewFromUtf8Literal(isolate, "could not resolve import");
@@ -1505,17 +1633,158 @@ static v8::MaybeLocal<v8::Module> graph_compile(State& st, v8::Local<v8::String>
     return module;
 }
 
+// Loads the modules reachable from |entry_url| that aren't already in the URL
+// registry, using the Context's persisted resolve/fetch_batch callbacks. Walks
+// level by level: fetch a batch ('f'), compile + register each module with its
+// cached_data, collect its imports, batch-resolve them ('r'), recurse into the
+// not-yet-registered targets. Records every resolved edge into |edges| and
+// appends newly compiled URLs to |new_urls| (with per-URL cache_rejected).
+// Already-registered URLs are reused — never re-fetched or re-compiled, so
+// dynamic import() of a URL the entry graph already pulled in gets the same
+// Module instance. Returns false with an exception pending on error.
+static bool walk_module_graph(State& st, const std::string& entry_url,
+                              std::unordered_map<std::string, std::string>& edges,
+                              std::vector<std::string>& new_urls,
+                              std::unordered_map<std::string, bool>& rejected_by_url)
+{
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> to_fetch;
+    if (registry_lookup(st, entry_url).IsEmpty()) {
+        to_fetch.push_back(entry_url);
+        seen.insert(entry_url);
+    }
+    while (!to_fetch.empty()) {
+        // ---- FETCH batch ----
+        v8::Local<v8::Array> urls_arr;
+        { v8::Context::Scope cs(st.safe_context); urls_arr = v8::Array::New(st.isolate, (int)to_fetch.size()); }
+        for (size_t i = 0; i < to_fetch.size(); i++) {
+            v8::Local<v8::String> u;
+            if (!graph_str(st, to_fetch[i], &u)) return false;
+            urls_arr->Set(st.context, (uint32_t)i, u).Check();
+        }
+        v8::Local<v8::Value> fetched_v;
+        if (!graph_roundtrip(st, 'f', urls_arr, &fetched_v)) return false;
+        if (!fetched_v->IsArray()) return false;
+        auto fetched = fetched_v.As<v8::Array>();
+
+        // ---- compile + register this level, collect edges ----
+        std::vector<std::pair<std::string, std::string>> level_edges; // (specifier, referrer_url)
+        std::unordered_set<std::string> edge_seen;                     // dedup (ref,spec)
+        for (size_t i = 0; i < to_fetch.size(); i++) {
+            const std::string url = to_fetch[i];
+            v8::Local<v8::Value> entry;
+            if (!fetched->Get(st.context, (uint32_t)i).ToLocal(&entry)) return false;
+            // nil / non-pair => fetch failed (404). Leave it uncompiled: any
+            // static import of it then fails at instantiate (ESM-correct for a
+            // missing dependency). Not added to new_urls (it was not loaded).
+            if (!entry->IsArray()) continue;
+            auto pair = entry.As<v8::Array>();
+            v8::Local<v8::Value> source_v, cached_v;
+            if (!pair->Get(st.context, 0).ToLocal(&source_v)) return false;
+            if (!pair->Get(st.context, 1).ToLocal(&cached_v)) return false;
+            v8::Local<v8::String> source, fname;
+            if (!source_v->ToString(st.context).ToLocal(&source)) return false;
+            if (!graph_str(st, url, &fname)) return false;
+            bool rej = false;
+            v8::Local<v8::Module> module;
+            if (!graph_compile(st, fname, source, cached_v, &rej).ToLocal(&module)) return false;
+            registry_register(st, url, module);
+            rejected_by_url[url] = rej;
+            new_urls.push_back(url);
+            // Collect imports for the resolve batch (deduped: `import a from "x";
+            // import b from "x"` is one edge).
+            auto requests = module->GetModuleRequests();
+            for (int r = 0; r < requests->Length(); r++) {
+                auto mr = requests->Get(st.context, r).As<v8::ModuleRequest>();
+                v8::String::Utf8Value spec(st.isolate, mr->GetSpecifier());
+                if (!*spec) continue;
+                std::string spec_s(*spec, spec.length());
+                if (edge_seen.insert(edge_key(url, spec_s)).second)
+                    level_edges.emplace_back(spec_s, url);
+            }
+        }
+
+        // ---- RESOLVE batch ----
+        to_fetch.clear();
+        if (level_edges.empty()) continue;
+        v8::Local<v8::Array> edges_arr;
+        { v8::Context::Scope cs(st.safe_context); edges_arr = v8::Array::New(st.isolate, (int)level_edges.size()); }
+        for (size_t i = 0; i < level_edges.size(); i++) {
+            v8::Local<v8::Array> pr;
+            { v8::Context::Scope cs(st.safe_context); pr = v8::Array::New(st.isolate, 2); }
+            v8::Local<v8::String> spec, ref;
+            if (!graph_str(st, level_edges[i].first, &spec)) return false;
+            if (!graph_str(st, level_edges[i].second, &ref)) return false;
+            pr->Set(st.context, 0, spec).Check();
+            pr->Set(st.context, 1, ref).Check();
+            edges_arr->Set(st.context, (uint32_t)i, pr).Check();
+        }
+        v8::Local<v8::Value> resolved_v;
+        if (!graph_roundtrip(st, 'r', edges_arr, &resolved_v)) return false;
+        if (!resolved_v->IsArray()) return false;
+        auto resolved = resolved_v.As<v8::Array>();
+        for (size_t i = 0; i < level_edges.size(); i++) {
+            v8::Local<v8::Value> u;
+            if (!resolved->Get(st.context, (uint32_t)i).ToLocal(&u)) return false;
+            std::string turl;
+            if (u->IsString()) {
+                v8::String::Utf8Value uu(st.isolate, u);
+                if (*uu) turl.assign(*uu, uu.length());
+            }
+            edges[edge_key(level_edges[i].second, level_edges[i].first)] = turl;
+            if (!turl.empty() && registry_lookup(st, turl).IsEmpty() && seen.find(turl) == seen.end()) {
+                seen.insert(turl);
+                to_fetch.push_back(turl);
+            }
+        }
+    }
+    return true;
+}
+
+// Instantiate (native resolver) + Evaluate |entry_module| under |graph|'s edges,
+// draining microtasks and rejecting on top-level await. Writes the evaluation
+// value to *out. Returns false with an exception pending on failure. active_graph
+// is save/restored (not blindly nulled) so a nested dynamic import() fired during
+// this Evaluate doesn't clobber an enclosing load's graph.
+static bool instantiate_and_evaluate(State& st, GraphLoad& graph,
+                                     v8::Local<v8::Module> entry_module,
+                                     v8::Local<v8::Value>* out)
+{
+    GraphLoad *prev = st.active_graph;
+    st.active_graph = &graph;
+    v8::Maybe<bool> ok = entry_module->InstantiateModule(st.context, graph_resolve_callback);
+    if (ok.IsNothing() || !ok.FromJust()) { st.active_graph = prev; return false; }
+    v8::Local<v8::Value> eval_result;
+    if (!entry_module->Evaluate(st.context).ToLocal(&eval_result)) { st.active_graph = prev; return false; }
+    st.isolate->PerformMicrotaskCheckpoint();
+    st.active_graph = prev;
+    if (!eval_result->IsPromise()) { *out = sanitize(st, eval_result); return true; }
+    auto promise = eval_result.As<v8::Promise>();
+    if (promise->State() == v8::Promise::kFulfilled) { *out = sanitize(st, promise->Result()); return true; }
+    if (promise->State() == v8::Promise::kRejected) { st.isolate->ThrowException(promise->Result()); return false; }
+    auto msg = v8::String::NewFromUtf8Literal(st.isolate,
+        "module evaluation is still pending (top-level await is not yet supported)");
+    st.isolate->ThrowException(v8::Exception::Error(msg));
+    return false;
+}
+
 // request: [entry_url:String]
 // response: errback [[value, [[url, cache_rejected:Bool], ...]], err]
 //
-// Walks the static import graph on the V8 thread: fetch a level (batch 'f'),
-// compile each module with its cached_data, collect its imports, batch-resolve
-// them to URLs (batch 'r'), recurse. Then InstantiateModule with a native,
-// Ruby-free resolver and Evaluate. Collapses the per-module
-// compile_module/instantiate round-trips (~2*N) down to ~2 per graph level.
+// Walks the static import graph on the V8 thread (see walk_module_graph), then
+// instantiates with a native resolver and evaluates. Collapses the per-module
+// compile_module/instantiate round-trips (~2*N) down to ~2 per graph level, and
+// registers every module in the URL registry so later dynamic import() reuses
+// the same instances. `modules` lists only modules newly compiled by this call.
 extern "C" void v8_load_module_graph(State *pst, const uint8_t *p, size_t n)
 {
     State& st = *pst;
+    // Route dynamic import() through the registry for the rest of this load
+    // (the entry's own top-level import() must reuse it) and, on success, for
+    // the Context's life. Reverted below if this load fails, so a failed first
+    // load doesn't permanently disable the legacy dynamic_import_resolver.
+    bool prev_uses_graph_loader = st.uses_graph_loader;
+    st.uses_graph_loader = true;
     v8::TryCatch try_catch(st.isolate);
     try_catch.SetVerbose(st.verbose_exceptions);
     v8::HandleScope handle_scope(st.isolate);
@@ -1524,7 +1793,7 @@ extern "C" void v8_load_module_graph(State *pst, const uint8_t *p, size_t n)
     v8::Local<v8::Value> result;
     int cause = INTERNAL_ERROR;
     GraphLoad graph;
-    std::vector<std::string> order;                 // urls in discovery order
+    std::vector<std::string> new_urls;
     std::unordered_map<std::string, bool> rejected_by_url;
     {
         v8::Local<v8::Value> req_v;
@@ -1537,172 +1806,50 @@ extern "C" void v8_load_module_graph(State *pst, const uint8_t *p, size_t n)
         if (!*entry_u) goto fail;
         std::string entry_url(*entry_u, entry_u.length());
 
-        std::unordered_set<std::string> seen;        // every url ever queued
-        std::vector<std::string> to_fetch{entry_url};
-        seen.insert(entry_url);
+        cause = RUNTIME_ERROR;
+        if (!walk_module_graph(st, entry_url, graph.edges, new_urls, rejected_by_url)) goto fail;
 
-        while (!to_fetch.empty()) {
-            // ---- FETCH batch ----
-            v8::Local<v8::Array> urls_arr;
-            { v8::Context::Scope cs(st.safe_context); urls_arr = v8::Array::New(st.isolate, (int)to_fetch.size()); }
-            for (size_t i = 0; i < to_fetch.size(); i++) {
-                v8::Local<v8::String> u;
-                if (!graph_str(st, to_fetch[i], &u)) goto fail;
-                urls_arr->Set(st.context, (uint32_t)i, u).Check();
-            }
-            cause = RUNTIME_ERROR;
-            v8::Local<v8::Value> fetched_v;
-            if (!graph_roundtrip(st, 'f', urls_arr, &fetched_v)) goto fail;
-            cause = INTERNAL_ERROR;
-            if (!fetched_v->IsArray()) goto fail;
-            auto fetched = fetched_v.As<v8::Array>();
-
-            // ---- compile this level, collect edges ----
-            std::vector<std::pair<std::string, std::string>> level_edges; // (specifier, referrer_url)
-            std::unordered_set<std::string> edge_seen;                     // dedup (ref,spec)
-            for (size_t i = 0; i < to_fetch.size(); i++) {
-                const std::string url = to_fetch[i];
-                v8::Local<v8::Value> entry;
-                if (!fetched->Get(st.context, (uint32_t)i).ToLocal(&entry)) goto fail;
-                // nil / non-pair => fetch failed (404). Leave it uncompiled: any
-                // static import of it then fails at instantiate (the ESM-correct
-                // outcome for a missing dependency). It is intentionally not added
-                // to the returned modules list (it was not loaded).
-                if (!entry->IsArray()) continue;
-                auto pair = entry.As<v8::Array>();
-                v8::Local<v8::Value> source_v, cached_v;
-                if (!pair->Get(st.context, 0).ToLocal(&source_v)) goto fail;
-                if (!pair->Get(st.context, 1).ToLocal(&cached_v)) goto fail;
-                v8::Local<v8::String> source, fname;
-                if (!source_v->ToString(st.context).ToLocal(&source)) goto fail;
-                if (!graph_str(st, url, &fname)) goto fail;
-                bool rej = false;
-                v8::Local<v8::Module> module;
-                cause = PARSE_ERROR;
-                if (!graph_compile(st, fname, source, cached_v, &rej).ToLocal(&module)) goto fail;
-                cause = INTERNAL_ERROR;
-                graph.by_url[url] = module;
-                rejected_by_url[url] = rej;
-                order.push_back(url);
-                // Collect this module's imports for the resolve batch (deduped:
-                // `import a from "x"; import b from "x"` is one edge).
-                auto requests = module->GetModuleRequests();
-                for (int r = 0; r < requests->Length(); r++) {
-                    auto mr = requests->Get(st.context, r).As<v8::ModuleRequest>();
-                    v8::String::Utf8Value spec(st.isolate, mr->GetSpecifier());
-                    if (!*spec) continue;
-                    std::string spec_s(*spec, spec.length());
-                    if (edge_seen.insert(edge_key(url, spec_s)).second)
-                        level_edges.emplace_back(spec_s, url);
-                }
-            }
-
-            // ---- RESOLVE batch ----
-            to_fetch.clear();
-            if (!level_edges.empty()) {
-                v8::Local<v8::Array> edges_arr;
-                { v8::Context::Scope cs(st.safe_context); edges_arr = v8::Array::New(st.isolate, (int)level_edges.size()); }
-                for (size_t i = 0; i < level_edges.size(); i++) {
-                    v8::Local<v8::Array> pair;
-                    { v8::Context::Scope cs(st.safe_context); pair = v8::Array::New(st.isolate, 2); }
-                    v8::Local<v8::String> spec, ref;
-                    if (!graph_str(st, level_edges[i].first, &spec)) goto fail;
-                    if (!graph_str(st, level_edges[i].second, &ref)) goto fail;
-                    pair->Set(st.context, 0, spec).Check();
-                    pair->Set(st.context, 1, ref).Check();
-                    edges_arr->Set(st.context, (uint32_t)i, pair).Check();
-                }
-                cause = RUNTIME_ERROR;
-                v8::Local<v8::Value> resolved_v;
-                if (!graph_roundtrip(st, 'r', edges_arr, &resolved_v)) goto fail;
-                cause = INTERNAL_ERROR;
-                if (!resolved_v->IsArray()) goto fail;
-                auto resolved = resolved_v.As<v8::Array>();
-                for (size_t i = 0; i < level_edges.size(); i++) {
-                    v8::Local<v8::Value> u;
-                    if (!resolved->Get(st.context, (uint32_t)i).ToLocal(&u)) goto fail;
-                    std::string turl;
-                    if (u->IsString()) {
-                        v8::String::Utf8Value uu(st.isolate, u);
-                        if (*uu) turl.assign(*uu, uu.length());
-                    }
-                    graph.edges[edge_key(level_edges[i].second, level_edges[i].first)] = turl;
-                    if (!turl.empty() && graph.by_url.find(turl) == graph.by_url.end()
-                        && seen.find(turl) == seen.end()) {
-                        seen.insert(turl);
-                        to_fetch.push_back(turl);
-                    }
-                }
-            }
-        }
-
-        auto entry_it = graph.by_url.find(entry_url);
-        if (entry_it == graph.by_url.end()) {
-            cause = RUNTIME_ERROR;
+        v8::Local<v8::Module> entry_module = registry_lookup(st, entry_url);
+        if (entry_module.IsEmpty()) {
             auto msg = v8::String::NewFromUtf8Literal(st.isolate,
                 "load_module_graph: entry module could not be fetched");
             st.isolate->ThrowException(v8::Exception::Error(msg));
             goto fail;
         }
-        v8::Local<v8::Module> entry_module = entry_it->second;
 
-        // ---- INSTANTIATE (native resolver over the walked graph) ----
-        // active_graph stays set through Evaluate too: import.meta is first read
-        // during evaluation and init_import_meta_object resolves URLs from it.
-        // The fail: epilogue clears it on every exit path.
-        cause = RUNTIME_ERROR;
-        st.active_graph = &graph;
-        {
-            v8::Maybe<bool> ok = entry_module->InstantiateModule(st.context, graph_resolve_callback);
-            if (ok.IsNothing() || !ok.FromJust()) goto fail;
+        v8::Local<v8::Value> value;
+        if (!instantiate_and_evaluate(st, graph, entry_module, &value)) goto fail;
+
+        // ---- build [value, [[url, rejected], ...]] for newly compiled modules ----
+        cause = INTERNAL_ERROR;
+        v8::Local<v8::Array> mods;
+        { v8::Context::Scope cs(st.safe_context); mods = v8::Array::New(st.isolate, (int)new_urls.size()); }
+        for (size_t i = 0; i < new_urls.size(); i++) {
+            v8::Local<v8::Array> row;
+            { v8::Context::Scope cs(st.safe_context); row = v8::Array::New(st.isolate, 2); }
+            v8::Local<v8::String> u;
+            if (!graph_str(st, new_urls[i], &u)) goto fail;
+            row->Set(st.context, 0, u).Check();
+            row->Set(st.context, 1, v8::Boolean::New(st.isolate, rejected_by_url[new_urls[i]])).Check();
+            mods->Set(st.context, (uint32_t)i, row).Check();
         }
-
-        // ---- EVALUATE entry (drains microtasks; rejects on TLA, as elsewhere) ----
-        {
-            v8::Local<v8::Value> eval_result;
-            if (!entry_module->Evaluate(st.context).ToLocal(&eval_result)) goto fail;
-            st.isolate->PerformMicrotaskCheckpoint();
-            v8::Local<v8::Value> value;
-            if (!eval_result->IsPromise()) {
-                value = sanitize(st, eval_result);
-            } else {
-                auto promise = eval_result.As<v8::Promise>();
-                if (promise->State() == v8::Promise::kFulfilled) {
-                    value = sanitize(st, promise->Result());
-                } else if (promise->State() == v8::Promise::kRejected) {
-                    st.isolate->ThrowException(promise->Result());
-                    goto fail;
-                } else {
-                    auto msg = v8::String::NewFromUtf8Literal(st.isolate,
-                        "module evaluation is still pending "
-                        "(top-level await is not yet supported)");
-                    st.isolate->ThrowException(v8::Exception::Error(msg));
-                    goto fail;
-                }
-            }
-
-            // ---- build [value, [[url, rejected], ...]] ----
-            v8::Local<v8::Array> mods;
-            { v8::Context::Scope cs(st.safe_context); mods = v8::Array::New(st.isolate, (int)order.size()); }
-            for (size_t i = 0; i < order.size(); i++) {
-                v8::Local<v8::Array> row;
-                { v8::Context::Scope cs(st.safe_context); row = v8::Array::New(st.isolate, 2); }
-                v8::Local<v8::String> u;
-                if (!graph_str(st, order[i], &u)) goto fail;
-                row->Set(st.context, 0, u).Check();
-                row->Set(st.context, 1, v8::Boolean::New(st.isolate, rejected_by_url[order[i]])).Check();
-                mods->Set(st.context, (uint32_t)i, row).Check();
-            }
-            v8::Local<v8::Array> out;
-            { v8::Context::Scope cs(st.safe_context); out = v8::Array::New(st.isolate, 2); }
-            out->Set(st.context, 0, value).Check();
-            out->Set(st.context, 1, mods).Check();
-            result = out;
-        }
+        v8::Local<v8::Array> out;
+        { v8::Context::Scope cs(st.safe_context); out = v8::Array::New(st.isolate, 2); }
+        out->Set(st.context, 0, value).Check();
+        out->Set(st.context, 1, mods).Check();
+        result = out;
     }
     cause = NO_ERROR;
 fail:
     st.active_graph = nullptr;
+    // On failure (every goto-fail sets a nonzero cause; success and the
+    // reply-retry path leave it NO_ERROR), undo this load's registrations so it
+    // leaves no half-loaded modules behind, and revert the loader latch so a
+    // failed load doesn't disable the legacy resolver.
+    if (cause != NO_ERROR) {
+        registry_rollback(st, new_urls);
+        st.uses_graph_loader = prev_uses_graph_loader;
+    }
     if (st.isolate->IsExecutionTerminating()) {
         st.isolate->CancelTerminateExecution();
         cause = st.err_reason ? st.err_reason : TERMINATED_ERROR;
@@ -2376,6 +2523,10 @@ extern "C" void v8_reset_realm(State *pst)
     for (auto& kv : st.scripts) kv.second->Reset();
     st.scripts.clear();
     st.modules.clear();
+    st.module_id_by_url.clear();
+    // The fresh realm has no registered modules; fall back to the legacy dynamic
+    // import resolver until load_module_graph runs again and re-latches this.
+    st.uses_graph_loader = false;
 
     // Restore Locals from the new persistents and enter the new context so the
     // reply is serialized against it (install_realm leaves the members empty).

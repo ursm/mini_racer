@@ -146,9 +146,10 @@ typedef struct Context
     // Callable for `import(...)` in JS, or Qnil to reject dynamic imports
     // with a clear error. Set via Context#dynamic_import_resolver=.
     VALUE dynamic_import_resolver;
-    // Per-load_module_graph batched callbacks, Qnil when no load is active.
-    // Saved/restored via rb_ensure (like resolve_block) so nested loads and
-    // exceptions keep the slots consistent.
+    // Batched module-loader callbacks set by load_module_graph and persisted for
+    // the Context's lifetime (overwritten by the next load, freed on dispose), so
+    // registry-backed dynamic import() can reuse them after the call returns.
+    // Qnil until the first load_module_graph.
     VALUE graph_resolve_block; // ->(edges)  { [url|nil, ...] }
     VALUE graph_fetch_block;   // ->(urls)   { [[source, cached_data]|nil, ...] }
     Buf req, res;      // ruby->v8 request/response, mediated by |mtx| and |cv|
@@ -2612,8 +2613,6 @@ static VALUE module_instantiate(VALUE self)
 struct load_graph_args {
     Context *c;
     VALUE    entry_url;
-    VALUE    prev_resolve;
-    VALUE    prev_fetch;
 };
 
 static VALUE context_load_module_graph_body(VALUE arg)
@@ -2653,14 +2652,6 @@ static VALUE context_load_module_graph_body(VALUE arg)
     }
 }
 
-static VALUE context_load_module_graph_restore(VALUE arg)
-{
-    struct load_graph_args *la = (struct load_graph_args *)arg;
-    la->c->graph_resolve_block = la->prev_resolve;
-    la->c->graph_fetch_block   = la->prev_fetch;
-    return Qnil;
-}
-
 // EXPERIMENTAL (spike): compile+instantiate+evaluate an entire ES module graph
 // reachable from |entry_url| in one call, driving the walk on the V8 thread.
 // resolve:/fetch_batch: are invoked in batches (once per graph level) instead of
@@ -2668,7 +2659,13 @@ static VALUE context_load_module_graph_restore(VALUE arg)
 // compile_module + instantiate path to ~2 per level.
 //   resolve:     ->(edges) { edges.map { |specifier, referrer| url_or_nil } }
 //   fetch_batch: ->(urls)  { urls.map  { |u| [source, cached_data] | nil } }
-// Returns { value:, modules: [{ url:, cache_rejected: }, ...] }.
+// Returns { value:, modules: [{ url:, cache_rejected: }, ...] } for the modules
+// newly compiled by this call (already-registered URLs are reused, not relisted).
+//
+// The resolve/fetch_batch callbacks are persisted on the Context (overwritten by
+// the next load_module_graph, freed on dispose): a later dynamic import() reuses
+// them and the URL registry, so a URL the graph already loaded resolves to the
+// same Module instance instead of being recompiled.
 static VALUE context_load_module_graph(int argc, VALUE *argv, VALUE self)
 {
     VALUE entry_url, kwargs, resolve, fetch_batch;
@@ -2690,17 +2687,14 @@ static VALUE context_load_module_graph(int argc, VALUE *argv, VALUE self)
     if (!rb_respond_to(fetch_batch, rb_intern("call")))
         rb_raise(rb_eArgError, "load_module_graph requires a fetch_batch: callable");
 
-    // Save/restore the slots (rb_ensure) so a nested load from inside a batch
-    // callback, or an exception, leaves them consistent — same pattern as
-    // Module#instantiate's resolve_block.
-    la.c = c;
-    la.entry_url = entry_url;
-    la.prev_resolve = c->graph_resolve_block;
-    la.prev_fetch   = c->graph_fetch_block;
+    // Persist the callbacks for the Context's lifetime so dynamic import() can
+    // reuse them after this call returns (case A). A later load_module_graph
+    // overwrites them; dispose frees them.
     c->graph_resolve_block = resolve;
     c->graph_fetch_block   = fetch_batch;
-    return rb_ensure(context_load_module_graph_body, (VALUE)&la,
-                     context_load_module_graph_restore, (VALUE)&la);
+    la.c = c;
+    la.entry_url = entry_url;
+    return context_load_module_graph_body((VALUE)&la);
 }
 
 static VALUE module_evaluate(VALUE self)
