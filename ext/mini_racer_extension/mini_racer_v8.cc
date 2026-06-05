@@ -2528,6 +2528,17 @@ extern "C" void v8_reset_realm(State *pst)
     // import resolver until load_module_graph runs again and re-latches this.
     st.uses_graph_loader = false;
 
+    // Tell V8 the old realm is gone — the same primitive a browser uses on
+    // navigation / iframe teardown. Unlike low_memory_notification (a full GC
+    // that also flushes the compilation cache, throwing away the warm bytecode
+    // that makes realm reuse worthwhile), this nudges V8's MemoryReducer to
+    // reclaim the now-detached realm incrementally while KEEPING the compilation
+    // cache. Without it, detached realms accrue until heap pressure forces a GC,
+    // which on a heavy app (e.g. Discourse) can overshoot the limit before it
+    // fires. The `false` (no dependent context) argument is what triggers the
+    // proactive reduction — mirrors the snapshot-warmup call site.
+    st.isolate->ContextDisposedNotification(false);
+
     // Restore Locals from the new persistents and enter the new context so the
     // reply is serialized against it (install_realm leaves the members empty).
     restore_realm_locals(st);
