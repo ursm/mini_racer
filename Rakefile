@@ -13,7 +13,7 @@ end
 
 task :default => [:compile, :test]
 
-gem = Gem::Specification.load( File.dirname(__FILE__) + '/mini_racer.gemspec' )
+gem = Gem::Specification.load( File.dirname(__FILE__) + '/mini_racer-csim.gemspec' )
 
 if RUBY_ENGINE == "truffleruby"
   task :compile do

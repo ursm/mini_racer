@@ -4,24 +4,26 @@ $LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
 require "mini_racer/version"
 
 Gem::Specification.new do |spec|
-  spec.name = "mini_racer"
+  spec.name = "mini_racer-csim"
   spec.version = MiniRacer::VERSION
-  spec.authors = ["Sam Saffron"]
-  spec.email = ["sam.saffron@gmail.com"]
+  spec.authors = ["Keita Urashima", "Sam Saffron"]
+  spec.email = ["ursm@ursm.jp"]
 
-  spec.summary = "Minimal embedded v8 for Ruby"
-  spec.description = "Minimal embedded v8 engine for Ruby"
-  spec.homepage = "https://github.com/discourse/mini_racer"
+  spec.summary = "mini_racer fork with browser-fidelity ESM/realm extensions for capybara-simulated"
+  spec.description =
+    "A private fork of mini_racer (minimal embedded V8 for Ruby) adding " \
+    "browser-level behavior used by capybara-simulated: the V8 ES Module API, " \
+    "cross-process bytecode caching, an opt-in host namespace, realm reset, and " \
+    "a batched module-graph loader with a URL module registry. These are niche " \
+    "browser-fidelity features; general users should use upstream mini_racer. " \
+    "The library is still required as `mini_racer` and exposes the `MiniRacer` " \
+    "module, so it stays a drop-in for code targeting mini_racer."
+  spec.homepage = "https://github.com/ursm/mini_racer"
   spec.license = "MIT"
 
   spec.metadata = {
-    "bug_tracker_uri" => "https://github.com/discourse/mini_racer/issues",
-    "changelog_uri" =>
-      "https://github.com/discourse/mini_racer/blob/v#{spec.version}/CHANGELOG",
-    "documentation_uri" =>
-      "https://www.rubydoc.info/gems/mini_racer/#{spec.version}",
-    "source_code_uri" =>
-      "https://github.com/discourse/mini_racer/tree/v#{spec.version}"
+    "bug_tracker_uri" => "https://github.com/ursm/mini_racer/issues",
+    "source_code_uri" => "https://github.com/ursm/mini_racer/tree/csim"
   }
 
   spec.files =
