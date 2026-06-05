@@ -424,6 +424,15 @@ static v8::MaybeLocal<v8::Module> graph_resolve_callback(
     v8::Local<v8::Context> context, v8::Local<v8::String> specifier,
     v8::Local<v8::FixedArray> import_assertions, v8::Local<v8::Module> referrer);
 
+// Opt-in (MINI_RACER_TRACE_MODULES env) stderr tracing of the dynamic-import and
+// module-registry boundary — to correlate a real app's imports/registrations
+// with leaked handles in a heap snapshot. Inert (one getenv) when unset.
+static bool module_trace_on()
+{
+    static const bool on = (getenv("MINI_RACER_TRACE_MODULES") != nullptr);
+    return on;
+}
+
 // V8 calls this for every JS `import(...)` expression. We rendezvous to
 // Ruby (marker 'd'), expect a fully-instantiated MiniRacer::Module back,
 // evaluate it if still pending, then resolve the returned Promise with
@@ -462,6 +471,16 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
     };
 
     v8::Local<v8::Module> module;
+
+    if (module_trace_on()) {
+        v8::String::Utf8Value spec(st.isolate, specifier);
+        v8::String::Utf8Value ref(st.isolate, resource_name);
+        fprintf(stderr, "[mr.dynimport] specifier=%s referrer=%s path=%s\n",
+                *spec ? *spec : "?",
+                (resource_name->IsString() && *ref) ? *ref : "<none>",
+                st.uses_graph_loader ? "registry" : "legacy");
+        fflush(stderr);
+    }
 
     if (st.uses_graph_loader) {
         // Registry path: resolve the specifier to a URL via the persisted
@@ -514,6 +533,9 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
                 "dynamic import specifier could not be resolved to a URL"));
 
         module = registry_lookup(st, url);
+        if (module_trace_on())
+            fprintf(stderr, "[mr.dynimport] resolved url=%s registry_%s\n",
+                    url.c_str(), module.IsEmpty() ? "miss" : "hit"), fflush(stderr);
         if (module.IsEmpty()) {
             // Miss: load the not-yet-registered subgraph reachable from url,
             // then instantiate (the shared tail below evaluates + resolves). On
@@ -597,6 +619,9 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
             return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
                 "dynamic import resolver returned a handle unknown to this Context"));
         module = v8::Local<v8::Module>::New(st.isolate, it->second->handle);
+        if (module_trace_on())
+            fprintf(stderr, "[mr.dynimport] legacy resolver returned id=%d url=%s\n",
+                    id, it->second->filename.c_str()), fflush(stderr);
     }
 
     auto status = module->GetStatus();
@@ -1241,6 +1266,9 @@ extern "C" void v8_compile_module(State *pst, const uint8_t *p, size_t n)
         entry->handle.Reset(st.isolate, module);
         v8::String::Utf8Value fname(st.isolate, filename);
         if (*fname) entry->filename.assign(*fname, fname.length());
+        if (module_trace_on())
+            fprintf(stderr, "[mr.register] url=%s id=%d (compile_module)\n",
+                    *fname ? *fname : "?", id), fflush(stderr);
         st.modules[id] = std::move(entry);
 
         {
@@ -1503,6 +1531,8 @@ static void registry_register(State& st, const std::string& url, v8::Local<v8::M
     entry->filename = url;
     st.modules[id] = std::move(entry);
     st.module_id_by_url[url] = id;
+    if (module_trace_on())
+        fprintf(stderr, "[mr.register] url=%s id=%d (registry)\n", url.c_str(), id), fflush(stderr);
 }
 
 // Undo registry_register for |urls| — used to roll back a load that registered
@@ -2519,6 +2549,9 @@ extern "C" void v8_reset_realm(State *pst)
     // it (their handles are realm-bound, so they would both pin the old realm
     // and, if run after the swap, execute against the wrong globalThis — they
     // are invalidated here).
+    if (module_trace_on())
+        fprintf(stderr, "[mr.reset] clearing modules=%zu scripts=%zu url_index=%zu\n",
+                st.modules.size(), st.scripts.size(), st.module_id_by_url.size()), fflush(stderr);
     st.ruby_exception.Reset();
     for (auto& kv : st.scripts) kv.second->Reset();
     st.scripts.clear();
