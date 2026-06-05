@@ -131,13 +131,15 @@ struct State
     int err_reason;
     bool verbose_exceptions;
     std::vector<Callback*> callbacks;
-    // Cleared in ~State() under the still-live isolate so the contained
-    // Persistents / Globals can Reset() safely before isolate->Dispose().
-    std::unordered_map<int32_t, std::unique_ptr<v8::Persistent<v8::Script>>> scripts;
+    // v8::Global (not Persistent): Global's destructor Reset()s the handle,
+    // so erase()/clear() actually release the compiled script eagerly.
+    // Default-traits Persistent has kResetInDestructor=false — destroying it
+    // is a no-op that leaks the global handle until isolate->Dispose(), which
+    // would silently defeat Script#dispose. Cleared in ~State() under the
+    // still-live isolate so each Global can Reset() before isolate->Dispose().
+    std::unordered_map<int32_t, v8::Global<v8::Script>> scripts;
     int32_t next_script_id;
-    // ModuleEntry holds v8::Global<Module> + cached filename; Global's
-    // ~Global() actually frees the handle, unlike the default-traits
-    // Persistent used for scripts.
+    // ModuleEntry holds v8::Global<Module> + cached filename.
     std::unordered_map<int32_t, std::unique_ptr<ModuleEntry>> modules;
     int32_t next_module_id;
     // Context-persistent "1 URL = 1 Module" registry: url -> id into `modules`.
@@ -665,6 +667,14 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
                 return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
                     "dynamic import target has top-level await (not supported)"));
         }
+    } else if (status == v8::Module::kEvaluated && module->IsGraphAsync()) {
+        // An already-evaluated module handed back by a registry hit (or the
+        // resolver). The kInstantiated branch above only confirmed settlement
+        // for the module it just evaluated; a previously-evaluated async module
+        // may still have a pending top-level await whose TDZ namespace would
+        // fatally abort the process when serialized. Refuse it.
+        return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
+            "dynamic import target uses top-level await (not supported)"));
     }
 
     (void)resolver->Resolve(context, module->GetModuleNamespace());
@@ -681,6 +691,9 @@ static void init_import_meta_object(v8::Local<v8::Context> context,
                                     v8::Local<v8::Object> meta)
 {
     auto isolate = context->GetIsolate();
+    // module_filename() materializes a Local<Module> per entry while scanning;
+    // give them a scope to reclaim instead of piling onto the caller's.
+    v8::HandleScope handle_scope(isolate);
     State *pst = static_cast<State*>(isolate->GetData(0));
     const std::string& filename = module_filename(*pst, module);
     // Pass the byte length explicitly: filenames may contain embedded NULs,
@@ -1261,23 +1274,44 @@ extern "C" void v8_compile_module(State *pst, const uint8_t *p, size_t n)
             }
         }
 
+        // Ids are monotonic and serialized as Int32 on the wire. Refuse to
+        // wrap rather than invoke signed-overflow UB and risk aliasing a
+        // still-live handle id (unreachable in practice — each live module
+        // pins a Global handle, so the isolate OOMs long before 2^31).
+        if (st.next_module_id == INT32_MAX) {
+            cause = INTERNAL_ERROR;
+            auto msg = v8::String::NewFromUtf8Literal(st.isolate,
+                "module id space exhausted for this Context");
+            st.isolate->ThrowException(v8::Exception::Error(msg));
+            goto fail;
+        }
         int32_t id = ++st.next_module_id;
         auto entry = std::make_unique<ModuleEntry>();
         entry->handle.Reset(st.isolate, module);
         v8::String::Utf8Value fname(st.isolate, filename);
         if (*fname) entry->filename.assign(*fname, fname.length());
-        if (module_trace_on())
-            fprintf(stderr, "[mr.register] url=%s id=%d (compile_module)\n",
-                    *fname ? *fname : "?", id), fflush(stderr);
-        st.modules[id] = std::move(entry);
 
         {
             v8::Context::Scope context_scope(st.safe_context);
             result = v8::Array::New(st.isolate, 3);
         }
-        result->Set(st.context, 0, v8::Int32::New(st.isolate, id)).Check();
-        result->Set(st.context, 1, cache_value).Check();
-        result->Set(st.context, 2, v8::Boolean::New(st.isolate, rejected)).Check();
+        // Populate via the goto-fail idiom, not .Check(): compile_module runs
+        // under the watchdog (tag 'O' -> v8_timedwait), so a timeout can leave
+        // the isolate terminating here, making Set() return Nothing — .Check()
+        // would abort the process. The fail path replies a proper
+        // TERMINATED_ERROR instead. (mirrors v8_compile)
+        if (!result->Set(st.context, 0, v8::Int32::New(st.isolate, id)).FromMaybe(false)) goto fail;
+        if (!result->Set(st.context, 1, cache_value).FromMaybe(false)) goto fail;
+        if (!result->Set(st.context, 2, v8::Boolean::New(st.isolate, rejected)).FromMaybe(false)) goto fail;
+
+        // Register the module only after the reply array is fully built. If a
+        // Set above bailed (e.g. watchdog termination), the Ruby side gets an
+        // error and never learns the id, so it could never erase the entry —
+        // inserting earlier would orphan an undisposable handle until teardown.
+        if (module_trace_on())
+            fprintf(stderr, "[mr.register] url=%s id=%d (compile_module)\n",
+                    *fname ? *fname : "?", id), fflush(stderr);
+        st.modules[id] = std::move(entry);
     }
     cause = NO_ERROR;
 fail:
@@ -1917,10 +1951,24 @@ extern "C" void v8_module_namespace(State *pst, const uint8_t *p, size_t n)
     {
         v8::Local<v8::Module> module;
         if (!module_from_request(st, des, &module, &cause)) goto fail;
-        if (module->GetStatus() < v8::Module::kInstantiated) {
+        // Only a fully evaluated, non-async module has a safe-to-read namespace.
+        // Reading bindings still in the temporal dead zone (not yet evaluated,
+        // or a top-level-await module whose promise never settled) makes the
+        // serializer hit a throwing accessor on every property, which V8 turns
+        // into an unrecoverable FatalProcessOutOfMemory (process abort), not a
+        // catchable exception. Require kEvaluated AND !IsGraphAsync; surface an
+        // errored module's own exception; reject every other state.
+        auto status = module->GetStatus();
+        if (status == v8::Module::kErrored) {
+            cause = RUNTIME_ERROR;
+            st.isolate->ThrowException(module->GetException());
+            goto fail;
+        }
+        if (status != v8::Module::kEvaluated || module->IsGraphAsync()) {
             cause = RUNTIME_ERROR;
             auto msg = v8::String::NewFromUtf8Literal(st.isolate,
-                "module must be instantiated before its namespace can be read");
+                "module must be evaluated (and not use top-level await) before "
+                "its namespace can be read");
             st.isolate->ThrowException(v8::Exception::Error(msg));
             goto fail;
         }
@@ -2091,17 +2139,36 @@ extern "C" void v8_compile(State *pst, const uint8_t *p, size_t n)
             }
         }
 
+        // Ids are monotonic and serialized as Int32 on the wire. Refuse to
+        // wrap at INT32_MAX rather than invoke signed-overflow UB / risk
+        // aliasing a still-live id (unreachable in practice — each undisposed
+        // script pins a handle, so the isolate OOMs long before 2^31).
+        if (st.next_script_id == INT32_MAX) {
+            cause = INTERNAL_ERROR;
+            auto msg = v8::String::NewFromUtf8Literal(st.isolate,
+                "script id space exhausted for this Context");
+            st.isolate->ThrowException(v8::Exception::Error(msg));
+            goto fail;
+        }
         int32_t id = ++st.next_script_id;
-        st.scripts[id] = std::unique_ptr<v8::Persistent<v8::Script>>(
-            new v8::Persistent<v8::Script>(st.isolate, script));
 
         {
             v8::Context::Scope context_scope(st.safe_context);
             result = v8::Array::New(st.isolate, 3);
         }
-        result->Set(st.context, 0, v8::Int32::New(st.isolate, id)).Check();
-        result->Set(st.context, 1, cache_value).Check();
-        result->Set(st.context, 2, v8::Boolean::New(st.isolate, rejected)).Check();
+        // Populate via the goto-fail idiom, not .Check(): v8_compile runs under
+        // the watchdog ('K' -> v8_timedwait), so a timeout can leave the isolate
+        // terminating here, making Set() return Nothing — .Check() would abort
+        // the process. The fail path replies a proper TERMINATED_ERROR instead.
+        if (!result->Set(st.context, 0, v8::Int32::New(st.isolate, id)).FromMaybe(false)) goto fail;
+        if (!result->Set(st.context, 1, cache_value).FromMaybe(false)) goto fail;
+        if (!result->Set(st.context, 2, v8::Boolean::New(st.isolate, rejected)).FromMaybe(false)) goto fail;
+
+        // Register the handle only after the reply array is fully built. If a
+        // Set above bailed (e.g. watchdog termination), the Ruby side gets an
+        // error and never learns the id, so it could never erase the entry —
+        // inserting earlier would orphan an undisposable handle until teardown.
+        st.scripts[id].Reset(st.isolate, script);
     }
     cause = NO_ERROR;
 fail:
@@ -2144,7 +2211,7 @@ extern "C" void v8_run(State *pst, const uint8_t *p, size_t n)
             st.isolate->ThrowException(v8::Exception::Error(msg));
             goto fail;
         }
-        auto script = v8::Local<v8::Script>::New(st.isolate, *it->second);
+        auto script = v8::Local<v8::Script>::New(st.isolate, it->second);
         v8::Local<v8::Value> result_v;
         cause = RUNTIME_ERROR;
         if (!script->Run(st.context).ToLocal(&result_v)) goto fail;
@@ -2553,7 +2620,9 @@ extern "C" void v8_reset_realm(State *pst)
         fprintf(stderr, "[mr.reset] clearing modules=%zu scripts=%zu url_index=%zu\n",
                 st.modules.size(), st.scripts.size(), st.module_id_by_url.size()), fflush(stderr);
     st.ruby_exception.Reset();
-    for (auto& kv : st.scripts) kv.second->Reset();
+    // clear() destroys each v8::Global, and ~Global() Resets the handle under
+    // the still-live isolate — no explicit Reset loop needed (it would be for
+    // the old default-traits Persistent, whose destructor is a no-op).
     st.scripts.clear();
     st.modules.clear();
     st.module_id_by_url.clear();
