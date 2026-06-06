@@ -146,6 +146,10 @@ struct State
     v8::Local<v8::Context> safe_context;
     v8::Local<v8::Function> safe_context_function;
     v8::Persistent<v8::Value> ruby_exception;
+    // One security token shared by every realm in this isolate so per-frame
+    // realms (Context#create_realm) can reach each other's globals like
+    // same-origin iframes. Captured from the first realm's default token.
+    v8::Persistent<v8::Value> shared_security_token;
     // The opt-in host namespace name (Context.new(host_namespace:)), retained
     // so it can be re-installed on a fresh realm after reset_realm. Empty when
     // the embedder did not opt in.
@@ -931,6 +935,12 @@ static bool install_realm(State& st)
     v8::Local<v8::Context> safe_context = v8::Context::New(st.isolate);
     v8::Local<v8::Context> context = v8::Context::New(st.isolate);
     if (safe_context.IsEmpty() || context.IsEmpty()) return false;
+    // Give every realm the same security token (captured from the first one)
+    // so per-frame realms can access each other's globals. Set before the safe
+    // grant below so it reads the shared token via context->GetSecurityToken().
+    if (st.shared_security_token.IsEmpty())
+        st.shared_security_token.Reset(st.isolate, context->GetSecurityToken());
+    context->SetSecurityToken(v8::Local<v8::Value>::New(st.isolate, st.shared_security_token));
     v8::Local<v8::Function> safe_context_function;
     {
         v8::Context::Scope safe_scope(safe_context);
@@ -2585,6 +2595,79 @@ extern "C" void v8_threaded_enter(State *pst, Context *c, void (*f)(Context *c))
 // re-applied. Once install_realm commits the new realm and the old realm's
 // remaining roots are released below, the previous globalThis (and everything
 // hung off it) is unreachable and gets collected.
+// Create a fresh realm (a new v8::Context in this isolate) and reply its
+// integer id. The new realm inherits the attached host functions and the host
+// namespace (install_realm re-binds them) and shares the isolate's security
+// token, so per-frame realms can reach each other's globals. The caller's
+// active realm is restored before returning.
+extern "C" void v8_create_realm(State *pst)
+{
+    State& st = *pst;
+    v8::TryCatch try_catch(st.isolate);
+    try_catch.SetVerbose(st.verbose_exceptions);
+    v8::HandleScope handle_scope(st.isolate);
+    int cause = INTERNAL_ERROR;
+    v8::Local<v8::Value> result;
+    int32_t prev = st.active_realm_id;
+    int32_t id = st.next_realm_id;
+    st.realms[id] = std::make_unique<Realm>();
+    st.active_realm_id = id;
+    bool built = install_realm(st); // builds + commits into realms[id]
+    st.active_realm_id = prev;
+    restore_realm_locals(st);       // re-derive the caller realm's Locals
+    if (built) {
+        st.next_realm_id++;
+        cause = NO_ERROR;
+        result = v8::Integer::New(st.isolate, id);
+    } else {
+        st.realms.erase(id);        // build failed; drop the empty realm
+    }
+fail:
+    if (st.isolate->IsExecutionTerminating()) {
+        st.isolate->CancelTerminateExecution();
+        cause = st.err_reason ? st.err_reason : TERMINATED_ERROR;
+        st.err_reason = NO_ERROR;
+    }
+    if (bubble_up_ruby_exception(st, &try_catch)) return;
+    if (!cause && try_catch.HasCaught()) cause = RUNTIME_ERROR;
+    if (cause) result = v8::Undefined(st.isolate);
+    auto err = to_error(st, &try_catch, cause);
+    if (!reply(st, result, err)) {
+        assert(try_catch.HasCaught());
+        goto fail; // retry; can be termination exception
+    }
+}
+
+// Dispose a realm created by v8_create_realm. Payload: [id:Int32]. Id 0 (the
+// main realm) is never disposable. Clears the realm's handles under the live
+// isolate, then nudges V8 to reclaim the detached context (as reset_realm does).
+extern "C" void v8_dispose_realm(State *pst, const uint8_t *p, size_t n)
+{
+    State& st = *pst;
+    v8::HandleScope handle_scope(st.isolate);
+    v8::ValueDeserializer des(st.isolate, p, n);
+    des.ReadHeader(st.context).Check();
+    v8::Local<v8::Value> id_v;
+    if (des.ReadValue(st.context).ToLocal(&id_v)) {
+        int32_t id;
+        if (id_v->Int32Value(st.context).To(&id) && id != 0) {
+            auto it = st.realms.find(id);
+            if (it != st.realms.end()) {
+                Realm& r = *it->second;
+                r.modules.clear();
+                r.scripts.clear();
+                r.module_id_by_url.clear();
+                r.persistent_safe_context_function.Reset();
+                r.persistent_safe_context.Reset();
+                r.persistent_context.Reset();
+                st.realms.erase(it);
+                st.isolate->ContextDisposedNotification(false);
+            }
+        }
+    }
+    reply_retry(st, v8::String::Empty(st.isolate));
+}
+
 extern "C" void v8_reset_realm(State *pst)
 {
     State& st = *pst;
@@ -2708,6 +2791,7 @@ State::~State()
         }
         realms.clear();
         ruby_exception.Reset();
+        shared_security_token.Reset();
     }
     isolate->Dispose();
     for (Callback *cb : callbacks)

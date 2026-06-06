@@ -885,6 +885,7 @@ static void dispatch1(Context *c, const uint8_t *p, size_t n)
     assert(n > 0);
     switch (*p) {
     case 'A': return v8_attach(c->pst, p+1, n-1);
+    case 'B': return v8_create_realm(c->pst);               // (B)uild realm
     case 'C': return v8_timedwait(c, p+1, n-1, v8_call);
     case 'D': return v8_dispose_script(c->pst, p+1, n-1);
     case 'E': return v8_timedwait(c, p+1, n-1, v8_eval);
@@ -903,6 +904,7 @@ static void dispatch1(Context *c, const uint8_t *p, size_t n)
     case 'U': return v8_module_status(c->pst, p+1, n-1);    // (U) module status — non-blocking
     case 'V': return v8_timedwait(c, p+1, n-1, v8_evaluate_module); // e(V)aluate
     case 'W': return v8_warmup(c->pst, p+1, n-1);
+    case 'X': return v8_dispose_realm(c->pst, p+1, n-1);    // e(X)punge realm
     case 'Z': return v8_dispose_module(c->pst, p+1, n-1);   // (Z) dispose module handle
     case 'L':
         b = 0;
