@@ -1,0 +1,50 @@
+name: Release
+
+# Tag-triggered release of mini_racer-csim to RubyGems via trusted publishing
+# (OIDC — no API key stored in the repo).
+#
+# One-time prerequisite on rubygems.org: configure a Trusted Publisher for the
+# gem `mini_racer-csim`:
+#   - repository: ursm/mini_racer
+#   - workflow:   release.yml   (this file)
+#   - environment: rubygems.org (optional; matches `environment:` below)
+# RubyGems supports a "pending" trusted publisher, so the very first release
+# (before the gem exists on rubygems.org) can also use OIDC.
+#
+# To cut a release: bump MiniRacer::VERSION, then tag it, e.g.
+#   git tag v0.21.1.0 && git push origin v0.21.1.0
+# (the tag must equal "v#{MiniRacer::VERSION}" — enforced below).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # rubygems/release-gem creates a GitHub Release for the tag
+      id-token: write   # OIDC token for RubyGems trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+
+      - name: Verify the tag matches MiniRacer::VERSION
+        run: |
+          want="v$(ruby -Ilib -rmini_racer/version -e 'print MiniRacer::VERSION')"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::tag '$GITHUB_REF_NAME' does not match gem version '$want'"
+            exit 1
+          fi
+
+      # Builds the gem (bundle exec rake build) and pushes it to RubyGems using
+      # the OIDC token from the id-token permission above.
+      - name: Build and publish (trusted publishing)
+        uses: rubygems/release-gem@v1

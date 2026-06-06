@@ -23,7 +23,7 @@ Gem::Specification.new do |spec|
 
   spec.metadata = {
     "bug_tracker_uri" => "https://github.com/ursm/mini_racer/issues",
-    "source_code_uri" => "https://github.com/ursm/mini_racer/tree/csim"
+    "source_code_uri" => "https://github.com/ursm/mini_racer/tree/main"
   }
 
   spec.files =
