@@ -13,11 +13,12 @@ Gem::Specification.new do |spec|
   spec.description =
     "A private fork of mini_racer (minimal embedded V8 for Ruby) adding " \
     "browser-level behavior used by capybara-simulated: the V8 ES Module API, " \
-    "cross-process bytecode caching, an opt-in host namespace, realm reset, and " \
-    "a batched module-graph loader with a URL module registry. These are niche " \
-    "browser-fidelity features; general users should use upstream mini_racer. " \
-    "The library is still required as `mini_racer` and exposes the `MiniRacer` " \
-    "module, so it stays a drop-in for code targeting mini_racer."
+    "per-frame realms, realm reset, cross-process bytecode caching, an opt-in " \
+    "host namespace, and a batched module-graph loader with a URL module " \
+    "registry. These are niche browser-fidelity features; general users should " \
+    "use upstream mini_racer. It loads under its own `mini_racer_csim` require " \
+    "path and `MiniRacerCsim` namespace, so it never collides with upstream " \
+    "mini_racer in the same bundle."
   spec.homepage = "https://github.com/ursm/mini_racer"
   spec.license = "MIT"
 
