@@ -1300,6 +1300,59 @@ class MiniRacerTest < Minitest::Test
     realm.dispose # idempotent
   end
 
+  def test_realm_global_is_live_and_shared_cross_realm
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    a = ctx.create_realm
+    b = ctx.create_realm
+    b.eval("globalThis.shared = { n: 42 }")
+    a.eval("globalThis.B = #{b.id}")
+    # A reads B's global as a live object (not a copy)...
+    assert_equal 42, a.eval("__mr_realmGlobal(B).shared.n")
+    # ...and a mutation from A is visible in B = same underlying object.
+    a.eval("__mr_realmGlobal(B).shared.n = 100")
+    assert_equal 100, b.eval("globalThis.shared.n")
+  end
+
+  def test_realm_global_cross_realm_function_call
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    a = ctx.create_realm
+    b = ctx.create_realm
+    b.eval("globalThis.inc = (x) => x + 1")
+    a.eval("globalThis.B = #{b.id}")
+    assert_equal 6, a.eval("__mr_realmGlobal(B).inc(5)")
+  end
+
+  def test_realm_global_reaches_main_realm
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    ctx.eval("globalThis.m = 7")
+    a = ctx.create_realm
+    assert_equal 7, a.eval("__mr_realmGlobal(0).m")
+  end
+
+  def test_realm_global_unknown_realm_is_undefined
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    a = ctx.create_realm
+    assert_equal "undefined", a.eval("typeof __mr_realmGlobal(99999)")
+  end
+
+  def test_realm_has_independent_intrinsics
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    a = ctx.create_realm
+    b = ctx.create_realm
+    a.eval("globalThis.B = #{b.id}")
+    # Each realm has its own intrinsics (like an iframe): B's Object is not A's.
+    assert_equal false, a.eval("__mr_realmGlobal(B).Object === Object")
+    # An object built by B is `instanceof` B's Object, but not A's.
+    b.eval("globalThis.o = {}")
+    assert_equal true, a.eval("__mr_realmGlobal(B).o instanceof __mr_realmGlobal(B).Object")
+    assert_equal false, a.eval("__mr_realmGlobal(B).o instanceof Object")
+  end
+
   def test_create_realm_not_implemented_on_truffleruby
     skip("only relevant on TruffleRuby") unless RUBY_ENGINE == "truffleruby"
     ctx = MiniRacer::Context.new

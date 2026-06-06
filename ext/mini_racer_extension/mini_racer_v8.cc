@@ -757,6 +757,36 @@ void v8_drain_microtasks_callback(const v8::FunctionCallbackInfo<v8::Value>& inf
     info.GetReturnValue().SetUndefined();
 }
 
+// __mr_realmGlobal(id): returns the globalThis of realm `id` as a LIVE V8
+// object in the calling realm (same isolate, not a copy), or undefined for an
+// unknown realm. Installed on every realm's global. Because all realms share
+// one security token (see install_realm), the caller can read/write the
+// returned global's properties — this is how csim wires frames[i] /
+// iframe.contentWindow to the right realm. Cross-realm object identity holds:
+// mutating a property here is visible in the target realm and vice versa.
+void v8_realm_global_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
+{
+    auto isolate = info.GetIsolate();
+    State& st = *static_cast<State*>(v8::External::Cast(*info.Data())->Value());
+    auto context = isolate->GetCurrentContext();
+    int32_t id;
+    if (info.Length() < 1 || !info[0]->Int32Value(context).To(&id)) {
+        info.GetReturnValue().SetUndefined();
+        return;
+    }
+    auto it = st.realms.find(id);
+    if (it == st.realms.end()) {
+        info.GetReturnValue().SetUndefined();
+        return;
+    }
+    auto target = v8::Local<v8::Context>::New(isolate, it->second->persistent_context);
+    if (target.IsEmpty()) {
+        info.GetReturnValue().SetUndefined();
+        return;
+    }
+    info.GetReturnValue().Set(target->Global());
+}
+
 // Builds a fresh user realm (plus the companion safe context), wires the
 // safe-context marshalling helper against the new global, installs the opt-in
 // host namespace, and re-binds any previously attached host functions. On
@@ -985,6 +1015,19 @@ static bool install_realm(State& st)
             return false;
         if (!ns->Set(context, drain_name, drain).FromMaybe(false)) return false;
         if (!context->Global()->DefineOwnProperty(context, ns_name, ns, v8::DontEnum).FromMaybe(false))
+            return false;
+    }
+    // Install __mr_realmGlobal(id) on every realm (not gated by host_namespace):
+    // it returns realm `id`'s live globalThis so realms can reach each other
+    // (per-frame realms / iframes). Non-enumerable so it stays out of
+    // Object.keys(globalThis).
+    {
+        auto rg_name = v8::String::NewFromUtf8Literal(st.isolate, "__mr_realmGlobal");
+        auto rg_data = v8::External::New(st.isolate, pst);
+        v8::Local<v8::Function> rg;
+        if (!v8::Function::New(context, v8_realm_global_callback, rg_data).ToLocal(&rg))
+            return false;
+        if (!context->Global()->DefineOwnProperty(context, rg_name, rg, v8::DontEnum).FromMaybe(false))
             return false;
     }
     // Re-attach host functions onto the fresh global. Empty at boot; populated
