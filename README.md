@@ -10,6 +10,25 @@ It was created as an alternative to the excellent [therubyracer](https://github.
 
 MiniRacer has an adapter for [execjs](https://github.com/rails/execjs) so it can be used directly with Rails projects to minify assets, run babel or compile CoffeeScript.
 
+## This repository is `mini_racer-csim` (a fork)
+
+This is **`mini_racer-csim`**, a private fork of [`mini_racer`](https://github.com/rubyjs/mini_racer) maintained for [capybara-simulated](https://github.com/ursm/capybara-simulated). It adds browser-fidelity extensions (ES modules, realm reset, …) that capybara-simulated needs but most users do not — **if you are not using capybara-simulated, use upstream `mini_racer`.**
+
+It stays a **drop-in replacement**: the gem is still loaded with `require "mini_racer"` and exposes the `MiniRacer` module, so existing code keeps working. Only the gem name (`mini_racer-csim`) differs.
+
+### Additions over upstream
+
+| Feature | API | Notes |
+| --- | --- | --- |
+| Bytecode cache | `Context#compile(src, cached_data:, produce_cache:)` → `Script`, `Script#run`, `Script#cache_rejected?` | Cross-process V8 bytecode caching to skip parsing; see [Bytecode cache for repeated script evaluation](#bytecode-cache-for-repeated-script-evaluation) below |
+| ES Module API | `Context#compile_module` → `MiniRacer::Module` (`#instantiate` / `#evaluate` / `#namespace` / `#status` / `#cached_data` / `#dispose`); `Context#dynamic_import_resolver=` | V8's ES module pipeline, `import.meta.url`, dynamic `import()` |
+| Batched module-graph loader | `Context#load_module_graph(resolve:, …)` | Loads an ESM graph in one batched, native (C++) pass; one `Module` per URL shared across every load path |
+| Realm reset | `Context#reset_realm` | Discards the user realm (`globalThis`) while keeping the warm isolate (browser per-navigation model); re-binds attached host functions and the host namespace |
+| Host namespace | `Context.new(host_namespace: "MiniRacer")` → `globalThis.MiniRacer.drainMicrotasks()` | Opt-in JS namespace exposing an inline, rendezvous-free microtask checkpoint |
+| GVL release on boot | (automatic) | Releases the Ruby GVL while the V8 thread boots the isolate |
+
+The fork is periodically rebased on upstream `mini_racer` to pick up V8 / `libv8-node` bumps and bug fixes.
+
 ## Supported Ruby Versions & Troubleshooting
 
 MiniRacer only supports non-EOL versions of Ruby. See [Ruby Maintenance Branches](https://www.ruby-lang.org/en/downloads/branches/) for the list of non-EOL Rubies. If you require support for older versions of Ruby install an older version of the gem. [TruffleRuby](https://github.com/oracle/truffleruby) is also supported.
