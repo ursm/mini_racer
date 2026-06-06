@@ -1604,6 +1604,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_filename_in_parse_error
+    skip_on_truffleruby_compile_parse
     err = assert_raises(MiniRacer::ParseError) do
       MiniRacer::Context.new.compile("function foo(", filename: "bundle.js")
     end
@@ -1611,9 +1612,17 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_invalid_source
+    skip_on_truffleruby_compile_parse
     assert_raises(MiniRacer::ParseError) do
       MiniRacer::Context.new.compile("foo bar baz garbage")
     end
+  end
+
+  # TruffleRuby's Context#compile shim is lazy (it wraps the source and replays
+  # it through Context#eval on Script#run), so syntax errors surface at run
+  # time, not at compile time. The compile-time ParseError is V8-specific.
+  def skip_on_truffleruby_compile_parse
+    skip("TruffleRuby compiles lazily; parse errors surface at run, not compile") if RUBY_ENGINE == "truffleruby"
   end
 
   def test_compile_runtime_error
