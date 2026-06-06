@@ -1353,6 +1353,24 @@ class MiniRacerTest < Minitest::Test
     assert_equal false, a.eval("__mr_realmGlobal(B).o instanceof Object")
   end
 
+  def test_create_realm_is_reentrant_from_a_host_function
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    made = nil
+    # Lazy model: a host function (called mid-eval) creates a realm. This must
+    # not corrupt the suspended outer frame (it used to SEGV via a dangling
+    # active-realm handle).
+    ctx.attach("makeRealm", -> { made = ctx.create_realm; made.id })
+    id = ctx.eval("makeRealm()")
+    assert_kind_of Integer, id
+    assert_equal id, made.id
+    # the new realm works...
+    made.eval("globalThis.z = 5")
+    assert_equal 5, made.eval("globalThis.z")
+    # ...and the outer realm survived the re-entrant creation.
+    assert_equal 2, ctx.eval("1 + 1")
+  end
+
   def test_create_realm_not_implemented_on_truffleruby
     skip("only relevant on TruffleRuby") unless RUBY_ENGINE == "truffleruby"
     ctx = MiniRacer::Context.new

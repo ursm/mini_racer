@@ -2651,13 +2651,27 @@ extern "C" void v8_create_realm(State *pst)
     v8::HandleScope handle_scope(st.isolate);
     int cause = INTERNAL_ERROR;
     v8::Local<v8::Value> result;
+    // Save the caller's active-realm Locals and restore them by assignment
+    // afterward. install_realm clobbers st.context/safe_context/... while
+    // building the new realm; re-deriving them with restore_realm_locals would
+    // create handles in THIS function's HandleScope, leaving st.context
+    // dangling once it unwinds. That is harmless at top-level (the per-request
+    // enter clears + re-derives) but fatal when create_realm runs re-entrantly
+    // from inside a host callback (the suspended outer frame resumes on the
+    // dangling handle). The saved Locals' slots live in an outer, still-live
+    // HandleScope, so restoring them keeps the caller valid either way.
+    v8::Local<v8::Context> saved_context = st.context;
+    v8::Local<v8::Context> saved_safe_context = st.safe_context;
+    v8::Local<v8::Function> saved_safe_context_function = st.safe_context_function;
     int32_t prev = st.active_realm_id;
     int32_t id = st.next_realm_id;
     st.realms[id] = std::make_unique<Realm>();
     st.active_realm_id = id;
     bool built = install_realm(st); // builds + commits into realms[id]
     st.active_realm_id = prev;
-    restore_realm_locals(st);       // re-derive the caller realm's Locals
+    st.context = saved_context;
+    st.safe_context = saved_safe_context;
+    st.safe_context_function = saved_safe_context_function;
     if (built) {
         st.next_realm_id++;
         cause = NO_ERROR;
