@@ -165,6 +165,11 @@ struct State
     std::unordered_map<int32_t, std::unique_ptr<Realm>> realms;
     int32_t active_realm_id;
     int32_t next_realm_id;
+    // Promises that rejected with no handler, awaiting the next microtask
+    // checkpoint where we fire 'unhandledrejection' on their realm's globalThis
+    // (HTML notify-rejected-promises). Paired with the rejecting realm id; a
+    // handler added before notification removes the entry.
+    std::vector<std::pair<v8::Global<v8::Promise>, int32_t>> pending_rejections;
     // Depth counter incremented while v8_api_callback is on the stack.
     // CreateCodeCache walks live isolate state and corrupts the parser
     // when invoked from within a JS->Ruby->JS frame; see compile()'s
@@ -180,6 +185,11 @@ struct State
 static inline Realm& cur(State& st) { return *st.realms.at(st.active_realm_id); }
 
 namespace {
+
+// Fire 'unhandledrejection' on each pending rejection's realm (HTML notify-
+// rejected-promises). Called at the end of embedder-driven microtask
+// checkpoints. Defined after restore_realm_locals.
+static void notify_unhandled_rejections(State& st);
 
 // deliberately leaked on program exit,
 // not safe to destroy after main() returns
@@ -754,6 +764,7 @@ void v8_drain_microtasks_callback(const v8::FunctionCallbackInfo<v8::Value>& inf
     // PerformCheckpoint is a guarded no-op when the microtask depth is > 0, so
     // it is safe to call mid-execution and never force-nests microtask runs.
     v8::MicrotasksScope::PerformCheckpoint(st.isolate);
+    notify_unhandled_rejections(st);
     info.GetReturnValue().SetUndefined();
 }
 
@@ -793,6 +804,52 @@ void v8_realm_global_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
 // success it atomically commits the new realm into st.persistent_* (releasing
 // the previous one) and returns true. On any failure it touches none of the
 // persistents — the previous realm stays intact — and returns false with an
+// Realm id stored in each user context's embedder data (slot 1) at build time,
+// so a promise's creation context maps back to its realm in O(1).
+static const int kRealmIdEmbedderSlot = 1;
+static int32_t realm_id_of_context(v8::Local<v8::Context> ctx)
+{
+    if (ctx.IsEmpty()) return -1;
+    auto v = ctx->GetEmbedderData(kRealmIdEmbedderSlot);
+    if (v.IsEmpty() || !v->IsInt32()) return -1;
+    return v.As<v8::Int32>()->Value();
+}
+
+// V8 calls this when a promise's rejection state changes. We implement the
+// HTML "notify rejected promises" bookkeeping: queue promises that reject with
+// no handler (tagged with the realm they were created in), and drop them again
+// if a handler is attached before the next checkpoint. The actual
+// 'unhandledrejection' dispatch happens in notify_unhandled_rejections.
+void promise_reject_callback(v8::PromiseRejectMessage msg)
+{
+    auto promise = msg.GetPromise();
+    auto isolate = promise->GetIsolate();
+    State& st = *static_cast<State*>(isolate->GetData(0));
+    switch (msg.GetEvent()) {
+    case v8::kPromiseRejectWithNoHandler: {
+        v8::HandleScope handle_scope(isolate);
+        v8::Local<v8::Context> ctx;
+        if (!promise->GetCreationContext(isolate).ToLocal(&ctx)) return;
+        int32_t rid = realm_id_of_context(ctx);
+        if (rid < 0) return; // not one of our realms
+        st.pending_rejections.emplace_back(v8::Global<v8::Promise>(isolate, promise), rid);
+        break;
+    }
+    case v8::kPromiseHandlerAddedAfterReject: {
+        v8::HandleScope handle_scope(isolate);
+        for (auto it = st.pending_rejections.begin(); it != st.pending_rejections.end();) {
+            if (v8::Local<v8::Promise>::New(isolate, it->first) == promise)
+                it = st.pending_rejections.erase(it);
+            else
+                ++it;
+        }
+        break;
+    }
+    default:
+        break; // kPromiseRejectAfterResolved / kPromiseResolveAfterResolved
+    }
+}
+
 // exception pending in the caller's TryCatch. Defined after v8_api_callback
 // (which the re-bind needs). Assumes the isolate is entered by the caller.
 static bool install_realm(State& st);
@@ -824,6 +881,9 @@ extern "C" State *v8_thread_init(Context *c, const uint8_t *snapshot_buf,
     // Dispatch JS `import(...)` expressions to Ruby via marker 'd'.
     st.isolate->SetHostImportModuleDynamicallyCallback(
         host_import_module_dynamically_callback);
+    // Track unhandled promise rejections so we can fire 'unhandledrejection' on
+    // the rejecting realm's globalThis at the next microtask checkpoint.
+    st.isolate->SetPromiseRejectCallback(promise_reject_callback);
     st.max_memory = max_memory;
     if (st.max_memory > 0)
         st.isolate->AddGCEpilogueCallback(v8_gc_callback, pst);
@@ -953,6 +1013,52 @@ static void clear_realm_locals(State& st)
     st.safe_context_function = v8::Local<v8::Function>();
 }
 
+// HTML notify-rejected-promises: for each promise that rejected with no handler
+// since the last checkpoint, enter its realm and call the embedder's
+// globalThis.__mr_emitUnhandledRejection(reason, promise) if present (csim
+// turns that into a PromiseRejectionEvent so addEventListener('unhandledrejection')
+// fires natively in the right realm). The list is snapshotted and cleared first
+// so rejections triggered by a handler queue for the next checkpoint instead of
+// looping. A realm disposed in the meantime is skipped.
+static void notify_unhandled_rejections(State& st)
+{
+    if (st.pending_rejections.empty())
+        return;
+    std::vector<std::pair<v8::Global<v8::Promise>, int32_t>> pending;
+    pending.swap(st.pending_rejections);
+    // Preserve the caller's active-realm Locals (restore by assignment, never
+    // re-derive into this scope — see v8_create_realm).
+    v8::Local<v8::Context> saved_context = st.context;
+    v8::Local<v8::Context> saved_safe_context = st.safe_context;
+    v8::Local<v8::Function> saved_safe_context_function = st.safe_context_function;
+    int32_t prev = st.active_realm_id;
+    for (auto& pr : pending) {
+        auto it = st.realms.find(pr.second);
+        if (it == st.realms.end())
+            continue; // realm disposed since the rejection
+        v8::HandleScope handle_scope(st.isolate);
+        auto context = v8::Local<v8::Context>::New(st.isolate, it->second->persistent_context);
+        if (context.IsEmpty())
+            continue;
+        st.active_realm_id = pr.second;
+        restore_realm_locals(st);
+        v8::Context::Scope context_scope(context);
+        auto global = context->Global();
+        auto name = v8::String::NewFromUtf8Literal(st.isolate, "__mr_emitUnhandledRejection");
+        v8::Local<v8::Value> hook;
+        if (!global->Get(context, name).ToLocal(&hook) || !hook->IsFunction())
+            continue;
+        auto promise = v8::Local<v8::Promise>::New(st.isolate, pr.first);
+        v8::TryCatch try_catch(st.isolate); // swallow errors from the handler itself
+        v8::Local<v8::Value> args[2] = { promise->Result(), promise };
+        (void)hook.As<v8::Function>()->Call(context, global, 2, args);
+    }
+    st.active_realm_id = prev;
+    st.context = saved_context;
+    st.safe_context = saved_safe_context;
+    st.safe_context_function = saved_safe_context_function;
+}
+
 // See the forward declaration above v8_thread_init for the contract. All
 // build-time handles live in a private HandleScope. Nothing is committed until
 // the realm is fully built (including every host-fn re-bind), so a failure
@@ -971,6 +1077,9 @@ static bool install_realm(State& st)
     if (st.shared_security_token.IsEmpty())
         st.shared_security_token.Reset(st.isolate, context->GetSecurityToken());
     context->SetSecurityToken(v8::Local<v8::Value>::New(st.isolate, st.shared_security_token));
+    // Tag the user context with its realm id so the promise-reject callback can
+    // map a rejecting promise back to its realm in O(1).
+    context->SetEmbedderData(kRealmIdEmbedderSlot, v8::Integer::New(st.isolate, st.active_realm_id));
     v8::Local<v8::Function> safe_context_function;
     {
         v8::Context::Scope safe_scope(safe_context);
@@ -2385,6 +2494,7 @@ extern "C" void v8_perform_microtask_checkpoint(State *pst)
     try_catch.SetVerbose(st.verbose_exceptions);
     v8::HandleScope handle_scope(st.isolate);
     v8::MicrotasksScope::PerformCheckpoint(st.isolate);
+    notify_unhandled_rejections(st);
     reply_retry(st, v8::Undefined(st.isolate));
 }
 
@@ -2397,7 +2507,10 @@ extern "C" void v8_pump_message_loop(State *pst)
     bool ran_task = v8::platform::PumpMessageLoop(platform, st.isolate);
     if (st.isolate->IsExecutionTerminating()) goto fail;
     if (try_catch.HasCaught()) goto fail;
-    if (ran_task) v8::MicrotasksScope::PerformCheckpoint(st.isolate);
+    if (ran_task) {
+        v8::MicrotasksScope::PerformCheckpoint(st.isolate);
+        notify_unhandled_rejections(st);
+    }
     if (st.isolate->IsExecutionTerminating()) goto fail;
     if (platform->IdleTasksEnabled(st.isolate)) {
         double idle_time_in_seconds = 1.0 / 50;
@@ -2905,6 +3018,7 @@ State::~State()
             r.persistent_safe_context.Reset();
             r.persistent_context.Reset();
         }
+        pending_rejections.clear(); // Global<Promise> dtors Reset under the live isolate
         realms.clear();
         ruby_exception.Reset();
         shared_security_token.Reset();

@@ -1406,6 +1406,39 @@ class MiniRacerTest < Minitest::Test
     assert_equal 9, made.eval("globalThis.extra")  # the outer write is live in the realm
   end
 
+  def test_unhandled_rejection_fires_per_realm
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new(host_namespace: "MiniRacer")
+    a = ctx.create_realm
+    b = ctx.create_realm
+    # Each realm's bridge wires the unhandledrejection hook (csim's role).
+    [a, b].each do |r|
+      r.eval(<<~JS)
+        globalThis.caught = [];
+        globalThis.__mr_emitUnhandledRejection = (reason) => { globalThis.caught.push(String(reason)); };
+      JS
+    end
+    b.eval("Promise.reject(new Error('boom'))")
+    b.eval("MiniRacer.drainMicrotasks()")
+    # fired in B with the reason, and did not leak to A
+    assert_equal ["Error: boom"], b.eval("globalThis.caught")
+    assert_equal [], a.eval("globalThis.caught")
+  end
+
+  def test_handled_rejection_is_not_reported
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new(host_namespace: "MiniRacer")
+    r = ctx.create_realm
+    r.eval(<<~JS)
+      globalThis.caught = [];
+      globalThis.__mr_emitUnhandledRejection = (reason) => { globalThis.caught.push(String(reason)); };
+      const p = Promise.reject(42);
+      p.catch(() => {}); // handler added before the checkpoint
+    JS
+    r.eval("MiniRacer.drainMicrotasks()")
+    assert_equal [], r.eval("globalThis.caught")
+  end
+
   def test_create_realm_not_implemented_on_truffleruby
     skip("only relevant on TruffleRuby") unless RUBY_ENGINE == "truffleruby"
     ctx = MiniRacer::Context.new
