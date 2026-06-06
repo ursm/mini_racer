@@ -9,42 +9,6 @@ on:
 permissions: {}
 
 jobs:
-  test-truffleruby:
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - "macos-latest"
-          - "ubuntu-latest"
-        ruby:
-          - "truffleruby+graalvm"
-
-    name: ${{ matrix.os }} - ${{ matrix.ruby }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v4
-        with:
-          persist-credentials: false
-      - uses: ruby/setup-ruby@afeafc3d1ab54a631816aba4c914a0081c12ff2f # v1
-        with:
-          ruby-version: ${{ matrix.ruby }}
-          bundler-cache: true
-      - name: Install GraalVM JS component
-        run: truffleruby-polyglot-get js
-      - name: Compile
-        run: bundle exec rake compile
-      - name: Test
-        run: bundle exec rake test
-      - name: Build & Install gem
-        run: |
-          bundle exec rake build
-          gem uninstall --all --force mini_racer
-          gem install pkg/*.gem
-      - name: Smoke Test installed gem
-        run: ruby test/smoke/minimal.rb
-
   test-darwin:
     strategy:
       fail-fast: false

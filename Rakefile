@@ -15,19 +15,9 @@ task :default => [:compile, :test]
 
 gem = Gem::Specification.load( File.dirname(__FILE__) + '/mini_racer-csim.gemspec' )
 
-if RUBY_ENGINE == "truffleruby"
-  task :compile do
-    # noop
-  end
-
-  task :clean do
-    # noop
-  end
-else
-  require 'rake/extensiontask'
-  Rake::ExtensionTask.new( 'mini_racer_loader', gem )
-  Rake::ExtensionTask.new( 'mini_racer_extension', gem )
-end
+require 'rake/extensiontask'
+Rake::ExtensionTask.new( 'mini_racer_loader', gem )
+Rake::ExtensionTask.new( 'mini_racer_extension', gem )
 
 
 # via http://blog.flavorjon.es/2009/06/easily-valgrind-gdb-your-ruby-c.html

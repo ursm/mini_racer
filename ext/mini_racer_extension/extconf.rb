@@ -2,11 +2,6 @@ require 'mkmf'
 
 $srcs = ["mini_racer_extension.c", "mini_racer_v8.cc"]
 
-if RUBY_ENGINE == "truffleruby"
-  File.write("Makefile", dummy_makefile($srcdir).join(""))
-  return
-end
-
 require_relative '../../lib/mini_racer/version'
 gem 'libv8-node', MiniRacer::LIBV8_NODE_VERSION
 require 'libv8-node'
