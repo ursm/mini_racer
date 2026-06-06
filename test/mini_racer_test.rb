@@ -1235,12 +1235,7 @@ class MiniRacerTest < Minitest::Test
 
   # -- per-frame realms (Context#create_realm / MiniRacer::Realm) --
 
-  def skip_on_truffleruby_realm
-    skip("Context#create_realm is not supported on TruffleRuby") if RUBY_ENGINE == "truffleruby"
-  end
-
   def test_create_realm_returns_a_realm
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     realm = ctx.create_realm
     assert_kind_of MiniRacer::Realm, realm
@@ -1249,7 +1244,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_global_is_isolated_from_the_main_realm
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     ctx.eval("globalThis.x = 1")
     realm = ctx.create_realm
@@ -1260,7 +1254,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_inherits_attached_host_functions
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     ctx.attach("hostAdd", ->(a, b) { a + b })
     realm = ctx.create_realm
@@ -1268,7 +1261,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_call_and_attach
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     realm = ctx.create_realm
     realm.eval("globalThis.f = (a) => a * 10")
@@ -1278,7 +1270,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_multiple_realms_are_independent
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
@@ -1290,7 +1281,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_dispose
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     realm = ctx.create_realm
     refute realm.disposed?
@@ -1301,7 +1291,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_global_is_live_and_shared_cross_realm
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
@@ -1315,7 +1304,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_global_cross_realm_function_call
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
@@ -1325,7 +1313,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_global_reaches_main_realm
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     ctx.eval("globalThis.m = 7")
     a = ctx.create_realm
@@ -1333,14 +1320,12 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_global_unknown_realm_is_undefined
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     a = ctx.create_realm
     assert_equal "undefined", a.eval("typeof __mr_realmGlobal(99999)")
   end
 
   def test_realm_has_independent_intrinsics
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
@@ -1354,7 +1339,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_create_realm_is_reentrant_from_a_host_function
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     made = nil
     # Lazy model: a host function (called mid-eval) creates a realm. This must
@@ -1372,7 +1356,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_eval_is_reentrant_with_continuing_outer_eval
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     # A host function (mid-eval) creates a realm and evals in it, then the outer
     # eval *continues*. The re-entrant Realm#eval must restore the caller's V8
@@ -1386,7 +1369,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_reentrant_then_outer_cross_realm_access
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     made = nil
     ctx.attach("mk", lambda {
@@ -1407,7 +1389,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_unhandled_rejection_fires_per_realm
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new(host_namespace: "MiniRacer")
     a = ctx.create_realm
     b = ctx.create_realm
@@ -1426,7 +1407,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_handled_rejection_is_not_reported
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new(host_namespace: "MiniRacer")
     r = ctx.create_realm
     r.eval(<<~JS)
@@ -1440,7 +1420,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_of_returns_creation_realm
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
@@ -1452,7 +1431,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_of_attributes_callback_to_its_creation_realm
-    skip_on_truffleruby_realm
     ctx = MiniRacer::Context.new
     f0 = ctx.create_realm
     f1 = ctx.create_realm
@@ -1465,12 +1443,6 @@ class MiniRacerTest < Minitest::Test
       const cb = new (__mr_realmGlobal(F1).Function)("throw new Error('x')");
       __mr_realmOf(cb);
     JS
-  end
-
-  def test_create_realm_not_implemented_on_truffleruby
-    skip("only relevant on TruffleRuby") unless RUBY_ENGINE == "truffleruby"
-    ctx = MiniRacer::Context.new
-    assert_raises(NotImplementedError) { ctx.create_realm }
   end
 
   def test_webassembly
