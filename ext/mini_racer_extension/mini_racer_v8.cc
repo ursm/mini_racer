@@ -815,6 +815,33 @@ static int32_t realm_id_of_context(v8::Local<v8::Context> ctx)
     return v.As<v8::Int32>()->Value();
 }
 
+// __mr_realmOf(fn): returns the realm id where `fn` (any object/function) was
+// created — its [[Realm]] / creation context — or undefined if unknown. This is
+// the realm WebIDL's "invoke a callback function" reports errors against (e.g.
+// a setTimeout callback's uncaught throw is reported on the realm that *created*
+// the callback, not the scheduling realm nor the thrown Error's realm). csim
+// uses it to dispatch an ErrorEvent on __mr_realmGlobal(__mr_realmOf(cb)) from
+// its own per-callback try/catch.
+void v8_realm_of_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
+{
+    auto isolate = info.GetIsolate();
+    if (info.Length() < 1 || !info[0]->IsObject()) {
+        info.GetReturnValue().SetUndefined();
+        return;
+    }
+    v8::Local<v8::Context> ctx;
+    if (!info[0].As<v8::Object>()->GetCreationContext(isolate).ToLocal(&ctx)) {
+        info.GetReturnValue().SetUndefined();
+        return;
+    }
+    int32_t rid = realm_id_of_context(ctx);
+    if (rid < 0) {
+        info.GetReturnValue().SetUndefined();
+        return;
+    }
+    info.GetReturnValue().Set(v8::Integer::New(isolate, rid));
+}
+
 // V8 calls this when a promise's rejection state changes. We implement the
 // HTML "notify rejected promises" bookkeeping: queue promises that reject with
 // no handler (tagged with the realm they were created in), and drop them again
@@ -1137,6 +1164,14 @@ static bool install_realm(State& st)
         if (!v8::Function::New(context, v8_realm_global_callback, rg_data).ToLocal(&rg))
             return false;
         if (!context->Global()->DefineOwnProperty(context, rg_name, rg, v8::DontEnum).FromMaybe(false))
+            return false;
+        // __mr_realmOf(fn) -> realm id where fn was created (for per-realm error
+        // attribution; the embedder dispatches error events on that realm).
+        auto ro_name = v8::String::NewFromUtf8Literal(st.isolate, "__mr_realmOf");
+        v8::Local<v8::Function> ro;
+        if (!v8::Function::New(context, v8_realm_of_callback).ToLocal(&ro))
+            return false;
+        if (!context->Global()->DefineOwnProperty(context, ro_name, ro, v8::DontEnum).FromMaybe(false))
             return false;
     }
     // Re-attach host functions onto the fresh global. Empty at boot; populated

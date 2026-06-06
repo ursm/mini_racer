@@ -1439,6 +1439,34 @@ class MiniRacerTest < Minitest::Test
     assert_equal [], r.eval("globalThis.caught")
   end
 
+  def test_realm_of_returns_creation_realm
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    a = ctx.create_realm
+    b = ctx.create_realm
+    a.eval("globalThis.B = #{b.id}")
+    b.eval("globalThis.fn = function() {}")
+    assert_equal b.id, a.eval("__mr_realmOf(__mr_realmGlobal(B).fn)")  # cross-realm
+    assert_equal a.id, a.eval("__mr_realmOf(function() {})")
+    assert_equal "undefined", a.eval("typeof __mr_realmOf(42)")        # non-object
+  end
+
+  def test_realm_of_attributes_callback_to_its_creation_realm
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    f0 = ctx.create_realm
+    f1 = ctx.create_realm
+    f0.eval("globalThis.F1 = #{f1.id}")
+    # A callback built with frame1's Function constructor, scheduled from frame0:
+    # WebIDL attributes its uncaught error to the callback's [[Realm]] = frame1
+    # (not the scheduling realm, not the thrown Error's realm). __mr_realmOf
+    # reports exactly that, which is what the embedder dispatches the error on.
+    assert_equal f1.id, f0.eval(<<~JS)
+      const cb = new (__mr_realmGlobal(F1).Function)("throw new Error('x')");
+      __mr_realmOf(cb);
+    JS
+  end
+
   def test_create_realm_not_implemented_on_truffleruby
     skip("only relevant on TruffleRuby") unless RUBY_ENGINE == "truffleruby"
     ctx = MiniRacer::Context.new
