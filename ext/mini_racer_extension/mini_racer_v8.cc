@@ -103,24 +103,48 @@ struct GraphLoad
 // API rb_thread_lock_native_thread() that pins the thread but I don't
 // think we're quite ready yet to drop support for older versions, hence
 // this inelegant "everything" struct.
-struct State
+// A single V8 realm (v8::Context) plus the script/module bookkeeping bound to
+// it. mini_racer runs one "main" realm (id 0); Context#create_realm adds more
+// (per-frame realms in the same isolate, like browser iframes). Each realm has
+// its own user context, its companion safe-context marshalling function, and
+// its own script/module/url registries because those handles are realm-bound.
+struct Realm
 {
-    v8::Isolate *isolate;
-    // declaring as Local is safe because we take special care
-    // to ensure it's rooted in a HandleScope before being used
-    v8::Local<v8::Context> context;
-    // extra context for when we need access to built-ins like Array
-    // and want to be sure they haven't been tampered with by JS code
-    v8::Local<v8::Context> safe_context;
-    v8::Local<v8::Function> safe_context_function;
-    // Canonical roots for the user/safe realm. The Local members above are
-    // re-derived from these on every request (see v8_threaded_enter /
-    // v8_single_threaded_enter), so swapping the realm is just a matter of
-    // Reset()-ing these in install_realm — the old realm then has no roots
-    // left and is collected.
+    // Canonical roots for this realm. The State::context/safe_context/
+    // safe_context_function Locals are re-derived from these every request
+    // (see restore_realm_locals); swapping/selecting a realm is just a matter
+    // of which Realm's persistents we re-derive from.
     v8::Persistent<v8::Context> persistent_context;
     v8::Persistent<v8::Context> persistent_safe_context;
     v8::Persistent<v8::Function> persistent_safe_context_function;
+    // v8::Global (not Persistent): Global's destructor Reset()s the handle,
+    // so erase()/clear() actually release the compiled script eagerly.
+    std::unordered_map<int32_t, v8::Global<v8::Script>> scripts;
+    int32_t next_script_id = 0;
+    // ModuleEntry holds v8::Global<Module> + cached filename.
+    std::unordered_map<int32_t, std::unique_ptr<ModuleEntry>> modules;
+    int32_t next_module_id = 0;
+    // "1 URL = 1 Module" registry (url -> id into `modules`) shared across every
+    // load path for this realm's lifetime; cleared with `modules`.
+    std::unordered_map<std::string, int32_t> module_id_by_url;
+    // True once load_module_graph has run for this realm: routes dynamic
+    // import() through the URL registry instead of the legacy resolver.
+    bool uses_graph_loader = false;
+    // Set for the duration of v8_load_module_graph's InstantiateModule call so
+    // graph_resolve_callback can resolve imports from the pre-walked graph
+    // with zero Ruby round-trips. Null otherwise.
+    struct GraphLoad *active_graph = nullptr;
+};
+
+struct State
+{
+    v8::Isolate *isolate;
+    // Locals for the *active* realm (cur(*this)), re-derived each request from
+    // that Realm's persistents (see restore_realm_locals). `context` is the
+    // active user realm; `safe_context` is the trusted built-ins context.
+    v8::Local<v8::Context> context;
+    v8::Local<v8::Context> safe_context;
+    v8::Local<v8::Function> safe_context_function;
     v8::Persistent<v8::Value> ruby_exception;
     // The opt-in host namespace name (Context.new(host_namespace:)), retained
     // so it can be re-installed on a fresh realm after reset_realm. Empty when
@@ -131,38 +155,25 @@ struct State
     int err_reason;
     bool verbose_exceptions;
     std::vector<Callback*> callbacks;
-    // v8::Global (not Persistent): Global's destructor Reset()s the handle,
-    // so erase()/clear() actually release the compiled script eagerly.
-    // Default-traits Persistent has kResetInDestructor=false — destroying it
-    // is a no-op that leaks the global handle until isolate->Dispose(), which
-    // would silently defeat Script#dispose. Cleared in ~State() under the
-    // still-live isolate so each Global can Reset() before isolate->Dispose().
-    std::unordered_map<int32_t, v8::Global<v8::Script>> scripts;
-    int32_t next_script_id;
-    // ModuleEntry holds v8::Global<Module> + cached filename.
-    std::unordered_map<int32_t, std::unique_ptr<ModuleEntry>> modules;
-    int32_t next_module_id;
-    // Context-persistent "1 URL = 1 Module" registry: url -> id into `modules`.
-    // Populated by load_module_graph and by registry-backed dynamic import, so
-    // every load path that touches a URL shares one Module instance for the
-    // life of the realm. Cleared with `modules` on reset_realm / teardown.
-    std::unordered_map<std::string, int32_t> module_id_by_url;
-    // True once load_module_graph has run: routes dynamic import() through the
-    // URL registry + the persisted resolve/fetch_batch callbacks instead of the
-    // legacy per-import dynamic_import_resolver.
-    bool uses_graph_loader;
+    // Per-realm state. Main realm is id 0; Context#create_realm adds more.
+    // active_realm_id selects which Realm the current op targets — cur(*this)
+    // returns it. Holds unique_ptr because Realm contains non-movable Persistents.
+    std::unordered_map<int32_t, std::unique_ptr<Realm>> realms;
+    int32_t active_realm_id;
+    int32_t next_realm_id;
     // Depth counter incremented while v8_api_callback is on the stack.
     // CreateCodeCache walks live isolate state and corrupts the parser
     // when invoked from within a JS->Ruby->JS frame; see compile()'s
     // `produce_cache` handling.
     int in_callback;
-    // Set for the duration of v8_load_module_graph's InstantiateModule call so
-    // graph_resolve_callback can resolve imports from the pre-walked graph
-    // (url->Module + edge map) with zero Ruby round-trips. Null otherwise.
-    struct GraphLoad *active_graph;
     std::unique_ptr<v8::ArrayBuffer::Allocator> allocator;
     inline ~State();
 };
+
+// The realm the current op targets. active_realm_id is set when entering a
+// realm (boot/reset = 0; realm-scoped ops set it to their realm). Phase 1: it
+// is always 0, so this is the main realm and behavior is unchanged.
+static inline Realm& cur(State& st) { return *st.realms.at(st.active_realm_id); }
 
 namespace {
 
@@ -382,10 +393,10 @@ void v8_gc_callback(v8::Isolate*, v8::GCType, v8::GCCallbackFlags, void *data)
     }
 }
 
-// Linear scan of st.modules to map a Local<Module> back to the filename
+// Linear scan of cur(st).modules to map a Local<Module> back to the filename
 // captured at compile time. Returns empty string if the module isn't ours
 // (shouldn't happen — all live modules come from v8_compile_module /
-// load_module_graph). st.modules holds every module for the realm's lifetime
+// load_module_graph). cur(st).modules holds every module for the realm's lifetime
 // (reset_realm/teardown is the only reclaim point), so this scan is O(N) in the
 // realm's module count; fine for the per-visit-fresh-realm model (N is a single
 // page's graph), but a reverse index would be needed for a long-lived realm that
@@ -393,7 +404,7 @@ void v8_gc_callback(v8::Isolate*, v8::GCType, v8::GCCallbackFlags, void *data)
 static const std::string& module_filename(State& st, v8::Local<v8::Module> mod)
 {
     static const std::string empty;
-    for (auto& kv : st.modules) {
+    for (auto& kv : cur(st).modules) {
         auto stored = v8::Local<v8::Module>::New(st.isolate, kv.second->handle);
         if (stored == mod) return kv.second->filename;
     }
@@ -480,11 +491,11 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
         fprintf(stderr, "[mr.dynimport] specifier=%s referrer=%s path=%s\n",
                 *spec ? *spec : "?",
                 (resource_name->IsString() && *ref) ? *ref : "<none>",
-                st.uses_graph_loader ? "registry" : "legacy");
+                cur(st).uses_graph_loader ? "registry" : "legacy");
         fflush(stderr);
     }
 
-    if (st.uses_graph_loader) {
+    if (cur(st).uses_graph_loader) {
         // Registry path: resolve the specifier to a URL via the persisted
         // resolve callback, reuse the registry's Module if the URL was already
         // loaded (the identity fix), else walk + instantiate its subgraph. A
@@ -557,10 +568,10 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
                 return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
                     "dynamic import target could not be fetched"));
             }
-            GraphLoad *prev = st.active_graph;
-            st.active_graph = &graph;
+            GraphLoad *prev = cur(st).active_graph;
+            cur(st).active_graph = &graph;
             v8::Maybe<bool> ok = module->InstantiateModule(st.context, graph_resolve_callback);
-            st.active_graph = prev;
+            cur(st).active_graph = prev;
             if (ok.IsNothing() || !ok.FromJust()) {
                 registry_rollback(st, new_urls);
                 return reject_pending();
@@ -616,8 +627,8 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
             !id_v->Int32Value(st.context).To(&id))
             return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
                 "dynamic import reply could not be decoded"));
-        auto it = st.modules.find(id);
-        if (it == st.modules.end())
+        auto it = cur(st).modules.find(id);
+        if (it == cur(st).modules.end())
             return reject_with_literal(v8::String::NewFromUtf8Literal(isolate,
                 "dynamic import resolver returned a handle unknown to this Context"));
         module = v8::Local<v8::Module>::New(st.isolate, it->second->handle);
@@ -684,7 +695,7 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
 // V8 calls this the first time JS reads `import.meta` for a module.
 // Populate the `url` property with the filename passed to compile_module
 // — needed for relative resolution helpers like `new URL(spec, import.meta.url)`.
-// Graph/dynamic-import modules are registered in st.modules with filename=url,
+// Graph/dynamic-import modules are registered in cur(st).modules with filename=url,
 // so module_filename resolves them too.
 static void init_import_meta_object(v8::Local<v8::Context> context,
                                     v8::Local<v8::Module> module,
@@ -787,6 +798,10 @@ extern "C" State *v8_thread_init(Context *c, const uint8_t *snapshot_buf,
         v8::Isolate::Scope isolate_scope(st.isolate);
         v8::HandleScope handle_scope(st.isolate);
         st.host_namespace = host_namespace ? host_namespace : "";
+        // Create the main realm (id 0) before building it; cur(st) targets it.
+        st.realms[0] = std::make_unique<Realm>();
+        st.active_realm_id = 0;
+        st.next_realm_id = 1;
         // Build the user/safe realm and root it in st.persistent_*. The Local
         // members are not kept alive past here; each request re-derives them
         // from the persistents (see v8_threaded_enter / v8_single_threaded_enter).
@@ -891,9 +906,10 @@ static bool bind_callback(State& st, Callback *cb)
 // v8_reset_realm).
 static void restore_realm_locals(State& st)
 {
-    st.safe_context_function = v8::Local<v8::Function>::New(st.isolate, st.persistent_safe_context_function);
-    st.safe_context = v8::Local<v8::Context>::New(st.isolate, st.persistent_safe_context);
-    st.context = v8::Local<v8::Context>::New(st.isolate, st.persistent_context);
+    Realm& r = cur(st);
+    st.safe_context_function = v8::Local<v8::Function>::New(st.isolate, r.persistent_safe_context_function);
+    st.safe_context = v8::Local<v8::Context>::New(st.isolate, r.persistent_safe_context);
+    st.context = v8::Local<v8::Context>::New(st.isolate, r.persistent_context);
 }
 
 static void clear_realm_locals(State& st)
@@ -979,9 +995,10 @@ static bool install_realm(State& st)
     // Commit: root the new realm and release the previous one (Reset replaces
     // the old handle). The Local members dangle once handle_scope unwinds, so
     // clear them; the next per-request restore re-derives them.
-    st.persistent_safe_context_function.Reset(st.isolate, safe_context_function);
-    st.persistent_safe_context.Reset(st.isolate, safe_context);
-    st.persistent_context.Reset(st.isolate, context);
+    Realm& r = cur(st);
+    r.persistent_safe_context_function.Reset(st.isolate, safe_context_function);
+    r.persistent_safe_context.Reset(st.isolate, safe_context);
+    r.persistent_context.Reset(st.isolate, context);
     clear_realm_locals(st);
     return true;
 }
@@ -1157,7 +1174,7 @@ fail:
     }
 }
 
-// Pulls a Module handle id out of the request, looks it up in st.modules,
+// Pulls a Module handle id out of the request, looks it up in cur(st).modules,
 // and stores the Local in *out. On miss, sets *cause = RUNTIME_ERROR and
 // throws a V8 exception; on deserialization failure, leaves *cause alone
 // and lets the standard fail-path handler take over. Returns false in
@@ -1171,8 +1188,8 @@ static bool module_from_request(State& st,
     if (!des.ReadValue(st.context).ToLocal(&id_v)) return false;
     int32_t id;
     if (!id_v->Int32Value(st.context).To(&id)) return false;
-    auto it = st.modules.find(id);
-    if (it == st.modules.end()) {
+    auto it = cur(st).modules.find(id);
+    if (it == cur(st).modules.end()) {
         *cause = RUNTIME_ERROR;
         auto msg = v8::String::NewFromUtf8Literal(st.isolate, "no such module handle");
         st.isolate->ThrowException(v8::Exception::Error(msg));
@@ -1185,7 +1202,7 @@ static bool module_from_request(State& st,
 // request: [filename, source]
 // response: errback [handle_id:Int32, err]
 //
-// Parses |source| as an ES module. handle_id keys st.modules for later
+// Parses |source| as an ES module. handle_id keys cur(st).modules for later
 // v8_instantiate_module / v8_evaluate_module / v8_module_namespace /
 // v8_dispose_module. Imports declared by the module are not resolved here
 // — that happens in v8_instantiate_module via a Ruby-provided resolver.
@@ -1278,14 +1295,14 @@ extern "C" void v8_compile_module(State *pst, const uint8_t *p, size_t n)
         // wrap rather than invoke signed-overflow UB and risk aliasing a
         // still-live handle id (unreachable in practice — each live module
         // pins a Global handle, so the isolate OOMs long before 2^31).
-        if (st.next_module_id == INT32_MAX) {
+        if (cur(st).next_module_id == INT32_MAX) {
             cause = INTERNAL_ERROR;
             auto msg = v8::String::NewFromUtf8Literal(st.isolate,
                 "module id space exhausted for this Context");
             st.isolate->ThrowException(v8::Exception::Error(msg));
             goto fail;
         }
-        int32_t id = ++st.next_module_id;
+        int32_t id = ++cur(st).next_module_id;
         auto entry = std::make_unique<ModuleEntry>();
         entry->handle.Reset(st.isolate, module);
         v8::String::Utf8Value fname(st.isolate, filename);
@@ -1311,7 +1328,7 @@ extern "C" void v8_compile_module(State *pst, const uint8_t *p, size_t n)
         if (module_trace_on())
             fprintf(stderr, "[mr.register] url=%s id=%d (compile_module)\n",
                     *fname ? *fname : "?", id), fflush(stderr);
-        st.modules[id] = std::move(entry);
+        cur(st).modules[id] = std::move(entry);
     }
     cause = NO_ERROR;
 fail:
@@ -1335,7 +1352,7 @@ fail:
 // V8 invokes this for each static import while InstantiateModule walks
 // the import graph. It has no embedder slot, so State is recovered via
 // isolate->GetData(0). We round-trip to Ruby with marker 'm', expect an
-// int32 handle id back, and look it up in st.modules.
+// int32 handle id back, and look it up in cur(st).modules.
 //
 // The Ruby resolver block can re-enter the v8 thread via other dispatch
 // tags (e.g. compile_module the requested module on demand) — that flows
@@ -1416,8 +1433,8 @@ static v8::MaybeLocal<v8::Module> resolve_module_callback(
     if (!des.ReadValue(st.context).ToLocal(&id_v)) return v8::MaybeLocal<v8::Module>();
     int32_t id;
     if (!id_v->Int32Value(st.context).To(&id)) return v8::MaybeLocal<v8::Module>();
-    auto it = st.modules.find(id);
-    if (it == st.modules.end()) {
+    auto it = cur(st).modules.find(id);
+    if (it == cur(st).modules.end()) {
         auto msg = v8::String::NewFromUtf8Literal(st.isolate,
             "module resolver returned a handle unknown to this Context");
         st.isolate->ThrowException(v8::Exception::Error(msg));
@@ -1548,10 +1565,10 @@ static std::string edge_key(const std::string& referrer, const std::string& spec
 // URL registry: one Module instance per URL for the realm's lifetime.
 static v8::Local<v8::Module> registry_lookup(State& st, const std::string& url)
 {
-    auto it = st.module_id_by_url.find(url);
-    if (it == st.module_id_by_url.end()) return v8::Local<v8::Module>();
-    auto m = st.modules.find(it->second);
-    if (m == st.modules.end()) return v8::Local<v8::Module>();
+    auto it = cur(st).module_id_by_url.find(url);
+    if (it == cur(st).module_id_by_url.end()) return v8::Local<v8::Module>();
+    auto m = cur(st).modules.find(it->second);
+    if (m == cur(st).modules.end()) return v8::Local<v8::Module>();
     return v8::Local<v8::Module>::New(st.isolate, m->second->handle);
 }
 
@@ -1559,12 +1576,12 @@ static v8::Local<v8::Module> registry_lookup(State& st, const std::string& url)
 // and import.meta.url resolve it). Caller must have confirmed a registry miss.
 static void registry_register(State& st, const std::string& url, v8::Local<v8::Module> module)
 {
-    int32_t id = ++st.next_module_id;
+    int32_t id = ++cur(st).next_module_id;
     auto entry = std::make_unique<ModuleEntry>();
     entry->handle.Reset(st.isolate, module);
     entry->filename = url;
-    st.modules[id] = std::move(entry);
-    st.module_id_by_url[url] = id;
+    cur(st).modules[id] = std::move(entry);
+    cur(st).module_id_by_url[url] = id;
     if (module_trace_on())
         fprintf(stderr, "[mr.register] url=%s id=%d (registry)\n", url.c_str(), id), fflush(stderr);
 }
@@ -1577,10 +1594,10 @@ static void registry_register(State& st, const std::string& url, v8::Local<v8::M
 static void registry_rollback(State& st, const std::vector<std::string>& urls)
 {
     for (const std::string& url : urls) {
-        auto it = st.module_id_by_url.find(url);
-        if (it == st.module_id_by_url.end()) continue;
-        st.modules.erase(it->second);
-        st.module_id_by_url.erase(it);
+        auto it = cur(st).module_id_by_url.find(url);
+        if (it == cur(st).module_id_by_url.end()) continue;
+        cur(st).modules.erase(it->second);
+        cur(st).module_id_by_url.erase(it);
     }
 }
 
@@ -1600,10 +1617,10 @@ static v8::MaybeLocal<v8::Module> graph_resolve_callback(
     auto isolate = st.isolate;
     v8::String::Utf8Value spec(isolate, specifier);
     std::string spec_s(*spec ? *spec : "", *spec ? spec.length() : 0);
-    if (st.active_graph) {
+    if (cur(st).active_graph) {
         const std::string& ref_url = module_filename(st, referrer);
-        auto e = st.active_graph->edges.find(edge_key(ref_url, spec_s));
-        if (e != st.active_graph->edges.end() && !e->second.empty()) {
+        auto e = cur(st).active_graph->edges.find(edge_key(ref_url, spec_s));
+        if (e != cur(st).active_graph->edges.end() && !e->second.empty()) {
             auto m = registry_lookup(st, e->second);
             if (!m.IsEmpty()) return m;
         }
@@ -1625,7 +1642,7 @@ static bool graph_roundtrip(State& st, char marker, v8::Local<v8::Value> request
                             v8::Local<v8::Value>* reply_out)
 {
     // Suspended in a host->Ruby roundtrip: the fetch/resolve block runs while
-    // this v8_load_module_graph frame (and its st.active_graph) sits on the C++
+    // this v8_load_module_graph frame (and its cur(st).active_graph) sits on the C++
     // stack. Mark in_callback so reset_realm refuses and compile() refuses
     // CreateCodeCache — re-entering either from here would corrupt the realm or
     // V8's parser.
@@ -1814,14 +1831,14 @@ static bool instantiate_and_evaluate(State& st, GraphLoad& graph,
                                      v8::Local<v8::Module> entry_module,
                                      v8::Local<v8::Value>* out)
 {
-    GraphLoad *prev = st.active_graph;
-    st.active_graph = &graph;
+    GraphLoad *prev = cur(st).active_graph;
+    cur(st).active_graph = &graph;
     v8::Maybe<bool> ok = entry_module->InstantiateModule(st.context, graph_resolve_callback);
-    if (ok.IsNothing() || !ok.FromJust()) { st.active_graph = prev; return false; }
+    if (ok.IsNothing() || !ok.FromJust()) { cur(st).active_graph = prev; return false; }
     v8::Local<v8::Value> eval_result;
-    if (!entry_module->Evaluate(st.context).ToLocal(&eval_result)) { st.active_graph = prev; return false; }
+    if (!entry_module->Evaluate(st.context).ToLocal(&eval_result)) { cur(st).active_graph = prev; return false; }
     st.isolate->PerformMicrotaskCheckpoint();
-    st.active_graph = prev;
+    cur(st).active_graph = prev;
     if (!eval_result->IsPromise()) { *out = sanitize(st, eval_result); return true; }
     auto promise = eval_result.As<v8::Promise>();
     if (promise->State() == v8::Promise::kFulfilled) { *out = sanitize(st, promise->Result()); return true; }
@@ -1847,8 +1864,8 @@ extern "C" void v8_load_module_graph(State *pst, const uint8_t *p, size_t n)
     // (the entry's own top-level import() must reuse it) and, on success, for
     // the Context's life. Reverted below if this load fails, so a failed first
     // load doesn't permanently disable the legacy dynamic_import_resolver.
-    bool prev_uses_graph_loader = st.uses_graph_loader;
-    st.uses_graph_loader = true;
+    bool prev_uses_graph_loader = cur(st).uses_graph_loader;
+    cur(st).uses_graph_loader = true;
     v8::TryCatch try_catch(st.isolate);
     try_catch.SetVerbose(st.verbose_exceptions);
     v8::HandleScope handle_scope(st.isolate);
@@ -1905,14 +1922,14 @@ extern "C" void v8_load_module_graph(State *pst, const uint8_t *p, size_t n)
     }
     cause = NO_ERROR;
 fail:
-    st.active_graph = nullptr;
+    cur(st).active_graph = nullptr;
     // On failure (every goto-fail sets a nonzero cause; success and the
     // reply-retry path leave it NO_ERROR), undo this load's registrations so it
     // leaves no half-loaded modules behind, and revert the loader latch so a
     // failed load doesn't disable the legacy resolver.
     if (cause != NO_ERROR) {
         registry_rollback(st, new_urls);
-        st.uses_graph_loader = prev_uses_graph_loader;
+        cur(st).uses_graph_loader = prev_uses_graph_loader;
     }
     if (st.isolate->IsExecutionTerminating()) {
         st.isolate->CancelTerminateExecution();
@@ -2051,7 +2068,7 @@ extern "C" void v8_dispose_module(State *pst, const uint8_t *p, size_t n)
     if (des.ReadValue(st.context).ToLocal(&id_v)) {
         int32_t id;
         if (id_v->Int32Value(st.context).To(&id))
-            st.modules.erase(id);
+            cur(st).modules.erase(id);
     }
     reply_retry(st, v8::String::Empty(st.isolate));
 }
@@ -2143,14 +2160,14 @@ extern "C" void v8_compile(State *pst, const uint8_t *p, size_t n)
         // wrap at INT32_MAX rather than invoke signed-overflow UB / risk
         // aliasing a still-live id (unreachable in practice — each undisposed
         // script pins a handle, so the isolate OOMs long before 2^31).
-        if (st.next_script_id == INT32_MAX) {
+        if (cur(st).next_script_id == INT32_MAX) {
             cause = INTERNAL_ERROR;
             auto msg = v8::String::NewFromUtf8Literal(st.isolate,
                 "script id space exhausted for this Context");
             st.isolate->ThrowException(v8::Exception::Error(msg));
             goto fail;
         }
-        int32_t id = ++st.next_script_id;
+        int32_t id = ++cur(st).next_script_id;
 
         {
             v8::Context::Scope context_scope(st.safe_context);
@@ -2168,7 +2185,7 @@ extern "C" void v8_compile(State *pst, const uint8_t *p, size_t n)
         // Set above bailed (e.g. watchdog termination), the Ruby side gets an
         // error and never learns the id, so it could never erase the entry —
         // inserting earlier would orphan an undisposable handle until teardown.
-        st.scripts[id].Reset(st.isolate, script);
+        cur(st).scripts[id].Reset(st.isolate, script);
     }
     cause = NO_ERROR;
 fail:
@@ -2204,8 +2221,8 @@ extern "C" void v8_run(State *pst, const uint8_t *p, size_t n)
         if (!des.ReadValue(st.context).ToLocal(&id_v)) goto fail;
         int32_t id;
         if (!id_v->Int32Value(st.context).To(&id)) goto fail;
-        auto it = st.scripts.find(id);
-        if (it == st.scripts.end()) {
+        auto it = cur(st).scripts.find(id);
+        if (it == cur(st).scripts.end()) {
             cause = RUNTIME_ERROR;
             auto msg = v8::String::NewFromUtf8Literal(st.isolate, "no such script handle");
             st.isolate->ThrowException(v8::Exception::Error(msg));
@@ -2245,7 +2262,7 @@ extern "C" void v8_dispose_script(State *pst, const uint8_t *p, size_t n)
     if (des.ReadValue(st.context).ToLocal(&id_v)) {
         int32_t id;
         if (id_v->Int32Value(st.context).To(&id))
-            st.scripts.erase(id);
+            cur(st).scripts.erase(id);
     }
     reply_retry(st, v8::String::Empty(st.isolate));
 }
@@ -2618,17 +2635,17 @@ extern "C" void v8_reset_realm(State *pst)
     // are invalidated here).
     if (module_trace_on())
         fprintf(stderr, "[mr.reset] clearing modules=%zu scripts=%zu url_index=%zu\n",
-                st.modules.size(), st.scripts.size(), st.module_id_by_url.size()), fflush(stderr);
+                cur(st).modules.size(), cur(st).scripts.size(), cur(st).module_id_by_url.size()), fflush(stderr);
     st.ruby_exception.Reset();
     // clear() destroys each v8::Global, and ~Global() Resets the handle under
     // the still-live isolate — no explicit Reset loop needed (it would be for
     // the old default-traits Persistent, whose destructor is a no-op).
-    st.scripts.clear();
-    st.modules.clear();
-    st.module_id_by_url.clear();
+    cur(st).scripts.clear();
+    cur(st).modules.clear();
+    cur(st).module_id_by_url.clear();
     // The fresh realm has no registered modules; fall back to the legacy dynamic
     // import resolver until load_module_graph runs again and re-latches this.
-    st.uses_graph_loader = false;
+    cur(st).uses_graph_loader = false;
 
     // Tell V8 the old realm is gone — the same primitive a browser uses on
     // navigation / iframe teardown. Unlike low_memory_notification (a full GC
@@ -2679,11 +2696,17 @@ State::~State()
     {
         v8::Locker locker(isolate);
         v8::Isolate::Scope isolate_scope(isolate);
-        modules.clear();
-        scripts.clear();
-        persistent_safe_context_function.Reset();
-        persistent_safe_context.Reset();
-        persistent_context.Reset();
+        // Clear every realm's handles under the still-live isolate so each
+        // Global Reset()s before isolate->Dispose().
+        for (auto& kv : realms) {
+            Realm& r = *kv.second;
+            r.modules.clear();
+            r.scripts.clear();
+            r.persistent_safe_context_function.Reset();
+            r.persistent_safe_context.Reset();
+            r.persistent_context.Reset();
+        }
+        realms.clear();
         ruby_exception.Reset();
     }
     isolate->Dispose();
