@@ -2748,6 +2748,15 @@ extern "C" void v8_realm_dispatch(State *pst, const uint8_t *p, size_t n)
     uint8_t op = p[4];
     const uint8_t *ip = p + 5;
     size_t in = n - 5;
+    // Save the caller's active-realm Locals and restore them by assignment (not
+    // restore_realm_locals, which would create dangling handles in this dying
+    // HandleScope). Same hazard/fix as v8_create_realm: without this a re-entrant
+    // realm op (e.g. Realm#eval called from a host function) leaves the resuming
+    // outer frame on a dead st.context and SEGVs. The RAII Context::Scope below
+    // already balances V8's entered-context stack; this restores the State Locals.
+    v8::Local<v8::Context> saved_context = st.context;
+    v8::Local<v8::Context> saved_safe_context = st.safe_context;
+    v8::Local<v8::Function> saved_safe_context_function = st.safe_context_function;
     int32_t prev = st.active_realm_id;
     st.active_realm_id = rid;
     {
@@ -2770,7 +2779,9 @@ extern "C" void v8_realm_dispatch(State *pst, const uint8_t *p, size_t n)
         }
     }
     st.active_realm_id = prev;
-    restore_realm_locals(st);
+    st.context = saved_context;
+    st.safe_context = saved_safe_context;
+    st.safe_context_function = saved_safe_context_function;
 }
 
 extern "C" void v8_reset_realm(State *pst)

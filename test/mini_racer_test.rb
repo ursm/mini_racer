@@ -1371,6 +1371,41 @@ class MiniRacerTest < Minitest::Test
     assert_equal 2, ctx.eval("1 + 1")
   end
 
+  def test_realm_eval_is_reentrant_with_continuing_outer_eval
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    # A host function (mid-eval) creates a realm and evals in it, then the outer
+    # eval *continues*. The re-entrant Realm#eval must restore the caller's V8
+    # context or the resuming outer frame SEGVs (sibling of the create_realm bug).
+    ctx.attach("mk", lambda {
+      r = ctx.create_realm
+      r.eval("globalThis.x = 1")
+      r.id
+    })
+    assert_equal "after 1", ctx.eval('var id = mk(); "after " + id')
+  end
+
+  def test_realm_reentrant_then_outer_cross_realm_access
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    made = nil
+    ctx.attach("mk", lambda {
+      made = ctx.create_realm
+      made.eval("globalThis.tag = 'frame'")
+      made.id
+    })
+    # Full flow: the outer eval creates the frame via a host fn, then reaches
+    # into it with __mr_realmGlobal and writes a property.
+    result = ctx.eval(<<~JS)
+      var id = mk();
+      var g = __mr_realmGlobal(id);
+      g.extra = 9;
+      g.tag + ":" + g.extra;
+    JS
+    assert_equal "frame:9", result
+    assert_equal 9, made.eval("globalThis.extra")  # the outer write is live in the realm
+  end
+
   def test_create_realm_not_implemented_on_truffleruby
     skip("only relevant on TruffleRuby") unless RUBY_ENGINE == "truffleruby"
     ctx = MiniRacer::Context.new
