@@ -7,6 +7,6 @@ Gemfile.lock
 /pkg/
 /spec/reports/
 /tmp/
-lib/mini_racer_extension.so
-lib/mini_racer_loader.so
+lib/mini_racer_csim_extension.so
+lib/mini_racer_csim_loader.so
 *.bundle

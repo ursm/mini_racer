@@ -1,3 +1,10 @@
+- 0.21.1.2 - 07-06-2026
+  - **Breaking:** move off the `mini_racer` require path / `MiniRacer` namespace to a fork-specific identity so the gem never collides with — and loads deterministically alongside — upstream `mini_racer` in the same bundle
+    - require path: `require 'mini_racer_csim'` (was `require 'mini_racer'`); the `require 'mini_racer-csim'` autorequire shim now points here
+    - Ruby namespace: `MiniRacerCsim` (was `MiniRacer`) — e.g. `MiniRacerCsim::Context`, `MiniRacerCsim::Snapshot`, `MiniRacerCsim::VERSION`
+    - native extensions: `mini_racer_csim_extension` / `mini_racer_csim_loader` (distinct `Init_` symbols and `.so` names)
+    - the JS-side host-namespace brand (`globalThis.MiniRacer` by default) is unchanged — it is embedder-chosen and independent of the Ruby namespace
+
 - 0.21.1.1 - 07-06-2026
   - Drop the TruffleRuby backend: mini_racer-csim is now a hard fork targeting CRuby/V8 only (the GraalJS/TruffleRuby shims and their tests are removed)
   - Add per-frame realms via `Context#create_realm`, returning a `MiniRacer::Realm` (multiple V8 realms in one isolate, browser-iframe semantics) with `Realm#eval` / `call` / `attach` / `dispose` / `disposed?`

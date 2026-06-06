@@ -43,7 +43,7 @@ jobs:
       - name: Build & Install gem
         run: |
           bundle exec rake build
-          gem uninstall --all --force mini_racer
+          gem uninstall --all --force mini_racer-csim
           gem install pkg/*.gem
       - name: Smoke Test installed gem
         run: ruby test/smoke/minimal.rb
@@ -101,7 +101,7 @@ jobs:
       - name: Build & Install gem
         run: |
           docker exec -w "${PWD}" ${{ steps.container.outputs.container_id }} bundle exec rake build
-          docker exec -w "${PWD}" ${{ steps.container.outputs.container_id }} gem uninstall --all --force mini_racer
+          docker exec -w "${PWD}" ${{ steps.container.outputs.container_id }} gem uninstall --all --force mini_racer-csim
           docker exec -w "${PWD}" ${{ steps.container.outputs.container_id }} gem install pkg/*.gem
       - name: Smoke Test installed gem
         run: docker exec -w "${PWD}" ${{ steps.container.outputs.container_id }} ruby test/smoke/minimal.rb

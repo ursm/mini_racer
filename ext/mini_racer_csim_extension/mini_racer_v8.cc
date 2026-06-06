@@ -461,7 +461,7 @@ static bool module_trace_on()
 }
 
 // V8 calls this for every JS `import(...)` expression. We rendezvous to
-// Ruby (marker 'd'), expect a fully-instantiated MiniRacer::Module back,
+// Ruby (marker 'd'), expect a fully-instantiated MiniRacerCsim::Module back,
 // evaluate it if still pending, then resolve the returned Promise with
 // its namespace. The contract requires the embedder to handle compile +
 // instantiate + evaluate; Ruby's resolver is responsible for the first
@@ -593,7 +593,7 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
         }
     } else {
         // Legacy path: the embedder's dynamic_import_resolver returns a
-        // fully-instantiated MiniRacer::Module (looked up by handle id).
+        // fully-instantiated MiniRacerCsim::Module (looked up by handle id).
         v8::Local<v8::Array> request;
         {
             v8::Context::Scope context_scope(st.safe_context);

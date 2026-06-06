@@ -14,14 +14,14 @@ MiniRacer has an adapter for [execjs](https://github.com/rails/execjs) so it can
 
 This is **`mini_racer-csim`**, a private fork of [`mini_racer`](https://github.com/rubyjs/mini_racer) maintained for [capybara-simulated](https://github.com/ursm/capybara-simulated). It adds browser-fidelity extensions (ES modules, realm reset, …) that capybara-simulated needs but most users do not — **if you are not using capybara-simulated, use upstream `mini_racer`.**
 
-It stays a **drop-in replacement**: the gem is still loaded with `require "mini_racer"` and exposes the `MiniRacer` module, so existing code keeps working. Only the gem name (`mini_racer-csim`) differs.
+It has its **own require path and namespace** so it never collides with — and loads deterministically alongside — upstream `mini_racer` in the same bundle: load it with `require 'mini_racer_csim'` and use the `MiniRacerCsim` module (e.g. `MiniRacerCsim::Context`). The native extensions are `mini_racer_csim_extension` / `mini_racer_csim_loader`. (The JS-side host-namespace brand, `globalThis.MiniRacer` by default, is embedder-chosen and unrelated to the Ruby namespace.)
 
 ### Additions over upstream
 
 | Feature | API | Notes |
 | --- | --- | --- |
 | Bytecode cache | `Context#compile(src, cached_data:, produce_cache:)` → `Script`, `Script#run`, `Script#cache_rejected?` | Cross-process V8 bytecode caching to skip parsing; see [Bytecode cache for repeated script evaluation](#bytecode-cache-for-repeated-script-evaluation) below |
-| ES Module API | `Context#compile_module` → `MiniRacer::Module` (`#instantiate` / `#evaluate` / `#namespace` / `#status` / `#cached_data` / `#dispose`); `Context#dynamic_import_resolver=` | V8's ES module pipeline, `import.meta.url`, dynamic `import()` |
+| ES Module API | `Context#compile_module` → `MiniRacerCsim::Module` (`#instantiate` / `#evaluate` / `#namespace` / `#status` / `#cached_data` / `#dispose`); `Context#dynamic_import_resolver=` | V8's ES module pipeline, `import.meta.url`, dynamic `import()` |
 | Batched module-graph loader | `Context#load_module_graph(resolve:, …)` | Loads an ESM graph in one batched, native (C++) pass; one `Module` per URL shared across every load path |
 | Realm reset | `Context#reset_realm` | Discards the user realm (`globalThis`) while keeping the warm isolate (browser per-navigation model); re-binds attached host functions and the host namespace |
 | Host namespace | `Context.new(host_namespace: "MiniRacer")` → `globalThis.MiniRacer.drainMicrotasks()` | Opt-in JS namespace exposing an inline, rendezvous-free microtask checkpoint |
@@ -55,7 +55,7 @@ If you have a problem installing MiniRacer, please consider the following steps:
 You can simply eval one or many JavaScript snippets in a shared context
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.eval("var adder = (a,b)=>a+b;")
 puts context.eval("adder(20,22)")
 # => 42
@@ -66,14 +66,14 @@ puts context.eval("adder(20,22)")
 You can attach one or many ruby proc that can be accessed via JavaScript
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.attach("math.adder", proc{|a,b| a+b})
 puts context.eval("math.adder(20,22)")
 # => 42
 ```
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.attach("array_and_hash", proc{{a: 1, b: [1, {a: 1}]}})
 puts context.eval("array_and_hash()")
 # => {"a" => 1, "b" => [1, {"a" => 1}]}
@@ -81,14 +81,14 @@ puts context.eval("array_and_hash()")
 
 ### Return binary data from Ruby to JavaScript
 
-Attached Ruby functions can return binary data as `Uint8Array` using `MiniRacer::Binary`:
+Attached Ruby functions can return binary data as `Uint8Array` using `MiniRacerCsim::Binary`:
 
 ```ruby
 require "digest"
 
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.attach("sha256_raw", ->(data) {
-  MiniRacer::Binary.new(Digest::SHA256.digest(data))
+  MiniRacerCsim::Binary.new(Digest::SHA256.digest(data))
 })
 
 # Inside JavaScript the return value is a Uint8Array
@@ -96,14 +96,14 @@ context.eval("sha256_raw('hello') instanceof Uint8Array") # => true
 context.eval("sha256_raw('hello').length")                 # => 32
 ```
 
-This is useful when you need to pass raw bytes (e.g., cryptographic digests, compressed data, binary file contents) from Ruby to JavaScript. The `MiniRacer::Binary` wrapper tells the bridge to serialize the data as a `Uint8Array` on the JavaScript side rather than a string.
+This is useful when you need to pass raw bytes (e.g., cryptographic digests, compressed data, binary file contents) from Ruby to JavaScript. The `MiniRacerCsim::Binary` wrapper tells the bridge to serialize the data as a `Uint8Array` on the JavaScript side rather than a string.
 
 ### GIL free JavaScript execution
 
 The Ruby Global interpreter lock is released when scripts are executing:
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 Thread.new do
   sleep 1
   context.stop
@@ -119,7 +119,7 @@ This allows you to execute multiple scripts in parallel.
 Contexts can specify a default timeout for scripts
 
 ```ruby
-context = MiniRacer::Context.new(timeout: 1000)
+context = MiniRacerCsim::Context.new(timeout: 1000)
 context.eval("while(true){}")
 # => exception is raised after 1 second (1000 ms)
 ```
@@ -130,7 +130,7 @@ Contexts can specify a memory softlimit for scripts
 
 ```ruby
 # terminates script if heap usage exceeds 200mb after V8 garbage collection has run
-context = MiniRacer::Context.new(max_memory: 200_000_000)
+context = MiniRacerCsim::Context.new(max_memory: 200_000_000)
 context.eval("var a = new Array(10000); while(true) {a = a.concat(new Array(10000)) }")
 # => V8OutOfMemoryError is raised
 ```
@@ -140,24 +140,24 @@ context.eval("var a = new Array(10000); while(true) {a = a.concat(new Array(1000
 You can provide `filename:` to `#eval` which will be used in stack traces produced by V8:
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.eval("var foo = function() {bar();}", filename: "a/foo.js")
 context.eval("bar()", filename: "a/bar.js")
 
-# JavaScript at a/bar.js:1:1: ReferenceError: bar is not defined (MiniRacer::RuntimeError)
+# JavaScript at a/bar.js:1:1: ReferenceError: bar is not defined (MiniRacerCsim::RuntimeError)
 # …
 ```
 
 ### Bytecode cache for repeated script evaluation
 
-`Context#compile` returns a `MiniRacer::Script` handle you can run multiple times,
+`Context#compile` returns a `MiniRacerCsim::Script` handle you can run multiple times,
 and exposes V8's bytecode cache so subsequent Contexts can skip the parse step.
 
 In a single process — e.g. warming a `Context` pool from one canonical compile:
 
 ```ruby
 # Warm the cache once — top-level compile, opt in with produce_cache: true.
-warm    = MiniRacer::Context.new
+warm    = MiniRacerCsim::Context.new
 warmed  = warm.compile(File.read("bundle.js"),
                        filename:      "bundle.js",
                        produce_cache: true)
@@ -165,7 +165,7 @@ warmed.run
 blob = warmed.cached_data   # ASCII-8BIT String, hold onto it in memory
 
 # Subsequent Contexts (e.g. a per-request pool) consume the blob and skip parsing.
-ctx    = MiniRacer::Context.new
+ctx    = MiniRacerCsim::Context.new
 script = ctx.compile(File.read("bundle.js"),
                      filename:    "bundle.js",
                      cached_data: blob)
@@ -180,12 +180,12 @@ blob. Use `Snapshot#dump` / `Snapshot.load` to share canonical bytes:
 
 ```ruby
 # Build the snapshot once, persist its bytes.
-snap_bytes = MiniRacer::Snapshot.new(snapshot_src).dump
+snap_bytes = MiniRacerCsim::Snapshot.new(snapshot_src).dump
 File.binwrite("snapshot.bin", snap_bytes)
 
 # Every process loads the same bytes.
-snap = MiniRacer::Snapshot.load(File.binread("snapshot.bin"))
-ctx  = MiniRacer::Context.new(snapshot: snap)
+snap = MiniRacerCsim::Snapshot.load(File.binread("snapshot.bin"))
+ctx  = MiniRacerCsim::Context.new(snapshot: snap)
 script = ctx.compile(File.read("bundle.js"),
                      filename:    "bundle.js",
                      cached_data: File.binread("bundle.js.cache"))
@@ -198,14 +198,14 @@ callers can skip a redundant copy. When V8 produces a fresh blob (initial compil
 with `produce_cache: true`, or a rejection while `produce_cache: true` was also
 set), it returns the new bytes.
 
-`MiniRacer::V8_CACHED_DATA_VERSION_TAG` exposes V8's
+`MiniRacerCsim::V8_CACHED_DATA_VERSION_TAG` exposes V8's
 `ScriptCompiler::CachedDataVersionTag()` — mix it into your cache key alongside
 the source hash so a libv8-node version bump invalidates stale blobs automatically.
 The constant is populated on first `Context.new` (after `Platform.set_flags!`),
 so read it after constructing at least one Context.
 
 ```ruby
-key = "#{Digest::SHA256.hexdigest(source)}-#{MiniRacer::V8_CACHED_DATA_VERSION_TAG}"
+key = "#{Digest::SHA256.hexdigest(source)}-#{MiniRacerCsim::V8_CACHED_DATA_VERSION_TAG}"
 ```
 
 Notes:
@@ -218,11 +218,11 @@ Notes:
   `Context#dispose` clears them.
 - `produce_cache: true` is only safe at the top level. From inside a host-fn
   callback (i.e., re-entrant compile while a JS → Ruby → JS frame is on the
-  stack) it raises `MiniRacer::RuntimeError`, because V8's `CreateCodeCache`
+  stack) it raises `MiniRacerCsim::RuntimeError`, because V8's `CreateCodeCache`
   walks live isolate state and corrupts the parser when re-entered. Warm the
   cache from the top level once and pass it back via `cached_data:` from your
   callbacks.
-- Cross-process reuse is **incompatible with `MiniRacer::Platform.set_flags!(:single_threaded)`**.
+- Cross-process reuse is **incompatible with `MiniRacerCsim::Platform.set_flags!(:single_threaded)`**.
   V8's single-threaded mode embeds process-local state in the cache blob, so
   every cached_data is rejected when consumed in a fresh process. Same-process
   reuse still works under `:single_threaded`. If you need both cross-process
@@ -233,13 +233,13 @@ Notes:
 
 Some Ruby web servers employ forking (for example unicorn or puma in clustered mode). V8 is not fork safe by default and sadly Ruby does not have support for fork notifications per [#5446](https://bugs.ruby-lang.org/issues/5446).
 
-Since 0.6.1 mini_racer does support V8 single threaded platform mode which should remove most forking related issues. To enable run this before using `MiniRacer::Context`, for example in a Rails initializer:
+Since 0.6.1 mini_racer does support V8 single threaded platform mode which should remove most forking related issues. To enable run this before using `MiniRacerCsim::Context`, for example in a Rails initializer:
 
 ```ruby
-MiniRacer::Platform.set_flags!(:single_threaded)
+MiniRacerCsim::Platform.set_flags!(:single_threaded)
 ```
 
-When using pre-fork `MiniRacer::Context` objects in `:single_threaded` mode,
+When using pre-fork `MiniRacerCsim::Context` objects in `:single_threaded` mode,
 ensure the process only forks while MiniRacer is quiescent: no thread may be
 evaluating JavaScript, calling into a context, disposing/freeing a context,
 running a Ruby callback from JavaScript, or otherwise using MiniRacer at the
@@ -250,14 +250,14 @@ in an unusable state in the child process.
 
 If you want to ensure your application does not leak memory after fork either:
 
-1. Ensure no `MiniRacer::Context` objects are created in the master process; or
-2. Dispose manually of all `MiniRacer::Context` objects prior to forking
+1. Ensure no `MiniRacerCsim::Context` objects are created in the master process; or
+2. Dispose manually of all `MiniRacerCsim::Context` objects prior to forking
 
 ```ruby
 # before fork
 
 require "objspace"
-ObjectSpace.each_object(MiniRacer::Context){|c| c.dispose}
+ObjectSpace.each_object(MiniRacerCsim::Context){|c| c.dispose}
 
 # fork here
 ```
@@ -267,7 +267,7 @@ ObjectSpace.each_object(MiniRacer::Context){|c| c.dispose}
 Context usage is threadsafe
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.eval("counter=0; plus=()=>counter++;")
 
 (1..10).map do
@@ -285,9 +285,9 @@ puts context.eval("counter")
 Contexts can be created with pre-loaded snapshots:
 
 ```ruby
-snapshot = MiniRacer::Snapshot.new("function hello() { return 'world!'; }")
+snapshot = MiniRacerCsim::Snapshot.new("function hello() { return 'world!'; }")
 
-context = MiniRacer::Context.new(snapshot: snapshot)
+context = MiniRacerCsim::Context.new(snapshot: snapshot)
 
 context.eval("hello()")
 # => "world!"
@@ -309,11 +309,11 @@ Snapshots can come in handy for example if you want your contexts to be pre-load
 Also note that snapshots can be warmed up, using the `warmup!` method, which allows you to call functions which are otherwise lazily compiled to get them to compile right away; any side effect of your warm up code being then dismissed. [More details on warming up here](https://github.com/electron/electron/issues/169#issuecomment-76783481), and a small example:
 
 ```ruby
-snapshot = MiniRacer::Snapshot.new("var counter = 0; function hello() { counter++; return 'world! '; }")
+snapshot = MiniRacerCsim::Snapshot.new("var counter = 0; function hello() { counter++; return 'world! '; }")
 
 snapshot.warmup!("hello()")
 
-context = MiniRacer::Context.new(snapshot: snapshot)
+context = MiniRacerCsim::Context.new(snapshot: snapshot)
 
 context.eval("hello()")
 # => "world! 1"
@@ -325,13 +325,13 @@ Snapshots can also be persisted to disk for faster startup:
 
 ```ruby
 # Save a snapshot to disk
-snapshot = MiniRacer::Snapshot.new('var foo = "bar";')
+snapshot = MiniRacerCsim::Snapshot.new('var foo = "bar";')
 File.binwrite("snapshot.bin", snapshot.dump)
 
 # Load it back in a later process
 blob = File.binread("snapshot.bin")
-snapshot = MiniRacer::Snapshot.load(blob)
-context = MiniRacer::Context.new(snapshot: snapshot)
+snapshot = MiniRacerCsim::Snapshot.load(blob)
+context = MiniRacerCsim::Context.new(snapshot: snapshot)
 context.eval("foo")
 # => "bar"
 ```
@@ -342,26 +342,26 @@ Note that snapshots are architecture and V8-version specific. A snapshot created
 
 ### Garbage collection
 
-You can make the garbage collector more aggressive by defining the context with `MiniRacer::Context.new(ensure_gc_after_idle: 1000)`. Using this will ensure V8 will run a full GC using `context.low_memory_notification` 1 second after the last eval on the context. Low memory notifications ensure long living contexts use minimal amounts of memory.
+You can make the garbage collector more aggressive by defining the context with `MiniRacerCsim::Context.new(ensure_gc_after_idle: 1000)`. Using this will ensure V8 will run a full GC using `context.low_memory_notification` 1 second after the last eval on the context. Low memory notifications ensure long living contexts use minimal amounts of memory.
 
 ### V8 Runtime flags
 
 It is possible to set V8 Runtime flags:
 
 ```ruby
-MiniRacer::Platform.set_flags! :noconcurrent_recompilation, max_inlining_levels: 10
+MiniRacerCsim::Platform.set_flags! :noconcurrent_recompilation, max_inlining_levels: 10
 ```
 
 This can come in handy if you want to use MiniRacer with Unicorn, which doesn't seem to always appreciate V8's liberal use of threading:
 
 ```ruby
-MiniRacer::Platform.set_flags! :noconcurrent_recompilation, :noconcurrent_sweeping
+MiniRacerCsim::Platform.set_flags! :noconcurrent_recompilation, :noconcurrent_sweeping
 ```
 
 Or else to unlock experimental features in V8, for example tail recursion optimization:
 
 ```ruby
-MiniRacer::Platform.set_flags! :harmony
+MiniRacerCsim::Platform.set_flags! :harmony
 
 js = <<-JS
 'use strict';
@@ -375,13 +375,13 @@ var f = function f(n){
 f(1e6);
 JS
 
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 
 context.eval js
 # => "foo"
 ```
 
-The same code without the harmony runtime flag results in a `MiniRacer::RuntimeError: RangeError: Maximum call stack size exceeded` exception.
+The same code without the harmony runtime flag results in a `MiniRacerCsim::RuntimeError: RangeError: Maximum call stack size exceeded` exception.
 Please refer to http://node.green/ as a reference on other harmony features.
 
 A list of all V8 runtime flags can be found using `node --v8-options`, or else by perusing [the V8 source code for flags (make sure to use the right version of V8)](https://github.com/v8/v8/blob/master/src/flags/flag-definitions.h).
@@ -400,7 +400,7 @@ Flags:
 When hosting v8 you may want to keep track of memory usage, use `#heap_stats` to get memory usage:
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 # use context
 p context.heap_stats
 # {:total_physical_size=>1280640,
@@ -413,11 +413,11 @@ p context.heap_stats
 If you wish to dispose of a context before waiting on the GC use `#dispose`:
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.eval("let a='testing';")
 context.dispose
 context.eval("a = 2")
-# MiniRacer::ContextDisposedError
+# MiniRacerCsim::ContextDisposedError
 
 # nothing works on the context from now on, it's a shell waiting to be disposed
 ```
@@ -425,7 +425,7 @@ context.eval("a = 2")
 A MiniRacer context can also be dumped in a heapsnapshot file using `#write_heap_snapshot(file_or_io)`
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 # use context
 context.write_heap_snapshot("test.heapsnapshot")
 ```
@@ -437,7 +437,7 @@ This file can then be loaded in the "memory" tab of the [Chrome DevTools](https:
 This calls the function passed as first argument:
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.eval("function hello(name) { return `Hello, ${name}!` }")
 context.call("hello", "George")
 # "Hello, George!"
@@ -453,7 +453,7 @@ Performance is slightly better than running `context.eval("hello('George')")` si
 V8 drains its microtask queue (e.g. callbacks queued via `Promise.resolve().then(...)`) automatically when script execution returns to the embedder, so most code "just works":
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.eval(<<~JS)
   let x = 0;
   Promise.resolve().then(() => x = 99);
@@ -465,7 +465,7 @@ context.eval("x")
 When JavaScript invokes a Ruby callback synchronously and you need queued microtasks to drain mid-execution — e.g. for spec-compliant ordering across a chain of synchronous `dispatchEvent` listeners — call `context.perform_microtask_checkpoint` from the callback:
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 context.attach("drain", -> { context.perform_microtask_checkpoint })
 context.eval(<<~JS)
   globalThis.log = [];
@@ -485,7 +485,7 @@ When the drain has to happen from within JavaScript itself — for example betwe
 It is exposed through an opt-in **host namespace** — a single object (in the spirit of Deno's `Deno` or Bun's `Bun`) that mini_racer hangs its non-standard helpers off. Pass `host_namespace:` to enable it; by default nothing is injected and the global stays clean:
 
 ```ruby
-context = MiniRacer::Context.new(host_namespace: "MiniRacer")
+context = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
 context.eval(<<~JS)
   globalThis.log = [];
   Promise.resolve().then(() => log.push("microtask"));
@@ -507,7 +507,7 @@ syntax), modules can have static imports that resolve to other modules and
 expose named exports through a real Module Namespace Object.
 
 ```ruby
-context = MiniRacer::Context.new
+context = MiniRacerCsim::Context.new
 
 dep  = context.compile_module("export const base = 10", filename: "dep.js")
 main = context.compile_module(<<~JS, filename: "main.js")
@@ -523,18 +523,18 @@ main.namespace  # => {"doubled" => 20}
 ```
 
 * `Context#compile_module(source, filename:)` — parses the source as a
-  module; the returned `MiniRacer::Module` is bound to its Context. The
+  module; the returned `MiniRacerCsim::Module` is bound to its Context. The
   `filename` is also exposed to the module as `import.meta.url`.
 * `Module#instantiate { |specifier, referrer_url| ... }` — walks the static
   import graph. The resolver block is called once per import declaration
   with the raw specifier string and the importing module's filename, so
   relative specifiers (`./foo`, `../bar`) can be resolved against the
-  referrer. It must return another `MiniRacer::Module` (typically from a
+  referrer. It must return another `MiniRacerCsim::Module` (typically from a
   per-Context cache). Imports can also be resolved lazily from inside the
   block via further `Context#compile_module` calls.
 * `Module#evaluate` — runs the module body. Returns the evaluation result
   (`nil` for the typical `export const …` shape). Modules with top-level
-  `await` raise `MiniRacer::RuntimeError` for now.
+  `await` raise `MiniRacerCsim::RuntimeError` for now.
 * `Module#namespace` — returns the Module Namespace Object as a Hash
   (`{ "default" => …, "namedExport" => … }`). Available after
   `instantiate` succeeds; `evaluate` populates the values.
@@ -544,7 +544,7 @@ main.namespace  # => {"doubled" => 20}
   the convention used elsewhere.
 * `Context#dynamic_import_resolver = proc { |specifier, referrer_url| ... }`
   — handler for JS `import(...)` expressions. The proc must return a
-  `MiniRacer::Module` (already instantiated; `evaluate` is driven for you
+  `MiniRacerCsim::Module` (already instantiated; `evaluate` is driven for you
   if pending). Set to `nil` to reject all dynamic imports. Drain the
   microtask queue with `Context#perform_microtask_checkpoint` to see the
   result in a `.then` callback or after `await`.

@@ -3,7 +3,7 @@ require 'timeout'
 
 class MiniRacerFunctionTest < Minitest::Test
   def test_fun
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("function f(x) { return 'I need ' + x + ' foos' }")
     assert_equal context.eval('f(10)'), 'I need 10 foos'
 
@@ -17,21 +17,21 @@ class MiniRacerFunctionTest < Minitest::Test
   end
 
   def test_non_existing_function
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("function f(x) { return 'I need ' + x + ' galettes' }")
 
     # f is defined, let's call g
-    assert_raises(MiniRacer::RuntimeError) do
+    assert_raises(MiniRacerCsim::RuntimeError) do
       context.call('g')
     end
   end
 
   def test_throwing_function
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval('function f(x) { throw new Error("foo bar") }')
 
     # f is defined, let's call g
-    err = assert_raises(MiniRacer::RuntimeError) do
+    err = assert_raises(MiniRacerCsim::RuntimeError) do
       context.call('f', 1)
     end
     assert_equal err.message, 'Error: foo bar'
@@ -39,7 +39,7 @@ class MiniRacerFunctionTest < Minitest::Test
   end
 
   def test_args_types
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("function f(x, y) { return 'I need ' + x + ' ' + y }")
 
     res = context.call('f', 3, 'bars')
@@ -53,7 +53,7 @@ class MiniRacerFunctionTest < Minitest::Test
   end
 
   def test_complex_return
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval('function f(x, y) { return { vx: x, vy: y, array: [x, y] } }')
 
     h = { 'vx' => 3, 'vy' => 'bars', 'array' => [3, 'bars'] }
@@ -62,7 +62,7 @@ class MiniRacerFunctionTest < Minitest::Test
   end
 
   def test_do_not_hang_with_concurrent_calls
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("function f(x) { return 'I need ' + x + ' foos' }")
 
     thread_count = 2

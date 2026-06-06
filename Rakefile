@@ -16,8 +16,8 @@ task :default => [:compile, :test]
 gem = Gem::Specification.load( File.dirname(__FILE__) + '/mini_racer-csim.gemspec' )
 
 require 'rake/extensiontask'
-Rake::ExtensionTask.new( 'mini_racer_loader', gem )
-Rake::ExtensionTask.new( 'mini_racer_extension', gem )
+Rake::ExtensionTask.new( 'mini_racer_csim_loader', gem )
+Rake::ExtensionTask.new( 'mini_racer_csim_extension', gem )
 
 
 # via http://blog.flavorjon.es/2009/06/easily-valgrind-gdb-your-ruby-c.html
@@ -75,7 +75,7 @@ namespace :test do
   end
 end
 
-desc 'run clang-tidy linter on mini_racer_extension.cc'
+desc 'run clang-tidy linter on mini_racer_csim_extension'
 task :lint do
   require 'mkmf'
   require 'libv8'
@@ -97,5 +97,5 @@ task :lint do
               portability-*
               readability-*).join(',')
 
-  sh RbConfig::expand("clang-tidy -checks='#{checks}' ext/mini_racer_extension/mini_racer_extension.cc -- #$INCFLAGS #$CXXFLAGS", conf)
+  sh RbConfig::expand("clang-tidy -checks='#{checks}' ext/mini_racer_csim_extension/mini_racer_v8.cc -- #$INCFLAGS #$CXXFLAGS", conf)
 end

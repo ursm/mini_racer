@@ -1132,7 +1132,7 @@ static VALUE rendezvous_resolve_do(VALUE arg)
         rb_raise(runtime_error, "module resolver requested but no resolver block is active");
     ret = rb_funcall(c->resolve_block, rb_intern("call"), 2, specifier, referrer_url);
     if (!rb_obj_is_kind_of(ret, module_class))
-        rb_raise(runtime_error, "module resolver must return a MiniRacer::Module, got %s",
+        rb_raise(runtime_error, "module resolver must return a MiniRacerCsim::Module, got %s",
                  rb_obj_classname(ret));
     TypedData_Get_Struct(ret, Module, &module_type, m);
     if (m->disposed)
@@ -1214,7 +1214,7 @@ static VALUE rendezvous_dynamic_import_do(VALUE arg)
                      specifier, referrer_url);
     if (!rb_obj_is_kind_of(ret, module_class))
         rb_raise(runtime_error,
-                 "dynamic import resolver must return a MiniRacer::Module, got %s",
+                 "dynamic import resolver must return a MiniRacerCsim::Module, got %s",
                  rb_obj_classname(ret));
     TypedData_Get_Struct(ret, Module, &module_type, m);
     if (m->disposed)
@@ -1289,7 +1289,7 @@ static VALUE rendezvous_graph_fetch_do(VALUE arg)
     VALUE ret = rb_funcall(c->graph_fetch_block, rb_intern("call"), 1, urls);
     // The cached_data element is an ASCII-8BIT String (same shape as
     // Module#cached_data / compile_module(cached_data:)). Wrap it as
-    // MiniRacer::Binary so it crosses to V8 as a Uint8Array — a bare String
+    // MiniRacerCsim::Binary so it crosses to V8 as a Uint8Array — a bare String
     // would serialize as a JS string and the code cache would be silently
     // dropped (and binary bytes mangled by UTF-8). Build fresh rows rather than
     // mutating the array the caller's block returned.
@@ -1577,7 +1577,7 @@ static VALUE context_alloc(VALUE klass)
             date_time_class = rb_const_get(rb_cObject, rb_intern("DateTime"));
     }
     if (NIL_P(binary_class)) {
-        VALUE m = rb_const_get(rb_cObject, rb_intern("MiniRacer"));
+        VALUE m = rb_const_get(rb_cObject, rb_intern("MiniRacerCsim"));
         if (Qtrue == rb_funcall(m, rb_intern("const_defined?"), 1, rb_str_new_cstr("Binary")))
             binary_class = rb_const_get(m, rb_intern("Binary"));
     }
@@ -1922,7 +1922,7 @@ static VALUE context_reset_realm(VALUE self)
     return Qnil;
 }
 
-// -- MiniRacer::Realm (per-frame realm = extra v8::Context in this isolate) --
+// -- MiniRacerCsim::Realm (per-frame realm = extra v8::Context in this isolate) --
 
 static void realm_free(void *arg)
 {
@@ -1953,7 +1953,7 @@ static VALUE realm_alloc(VALUE klass)
 static VALUE realm_initialize(int argc, VALUE *argv, VALUE self)
 {
     (void)argc; (void)argv; (void)self;
-    rb_raise(runtime_error, "MiniRacer::Realm must be created via Context#create_realm");
+    rb_raise(runtime_error, "MiniRacerCsim::Realm must be created via Context#create_realm");
 }
 
 // Resolve the parent Context, raising if the realm or its context is disposed.
@@ -2351,7 +2351,7 @@ init:
     {
         static int version_tag_defined;
         if (!version_tag_defined) {
-            VALUE m = rb_const_get(rb_cObject, rb_intern("MiniRacer"));
+            VALUE m = rb_const_get(rb_cObject, rb_intern("MiniRacerCsim"));
             rb_define_const(m, "V8_CACHED_DATA_VERSION_TAG",
                             UINT2NUM(v8_cached_data_version_tag()));
             version_tag_defined = 1;
@@ -2587,7 +2587,7 @@ static size_t script_size(const void *arg)
 static VALUE script_initialize(int argc, VALUE *argv, VALUE self)
 {
     (void)argc; (void)argv; (void)self;
-    rb_raise(runtime_error, "MiniRacer::Script must be created via Context#compile");
+    rb_raise(runtime_error, "MiniRacerCsim::Script must be created via Context#compile");
     return Qnil;
 }
 
@@ -2764,7 +2764,7 @@ static size_t module_size(const void *arg)
 static VALUE module_initialize(int argc, VALUE *argv, VALUE self)
 {
     (void)argc; (void)argv; (void)self;
-    rb_raise(runtime_error, "MiniRacer::Module must be created via Context#compile_module");
+    rb_raise(runtime_error, "MiniRacerCsim::Module must be created via Context#compile_module");
     return Qnil;
 }
 
@@ -3034,7 +3034,7 @@ static VALUE context_get_dynamic_import_resolver(VALUE self)
 }
 
 __attribute__((visibility("default")))
-void Init_mini_racer_extension(void)
+void Init_mini_racer_csim_extension(void)
 {
     VALUE c, m;
 
@@ -3042,7 +3042,7 @@ void Init_mini_racer_extension(void)
     id_cached_data   = rb_intern("cached_data");
     id_produce_cache = rb_intern("produce_cache");
 
-    m = rb_define_module("MiniRacer");
+    m = rb_define_module("MiniRacerCsim");
     c = rb_define_class_under(m, "Error", rb_eStandardError);
     snapshot_error = rb_define_class_under(m, "SnapshotError", c);
     platform_init_error = rb_define_class_under(m, "PlatformAlreadyInitialized", c);

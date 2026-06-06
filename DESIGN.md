@@ -12,9 +12,9 @@ To mitigate that, V8 runs on separate threads now.
 implementation
 ==============
 
-Each `MiniRacer::Context` is paired with a native system thread that runs V8.
+Each `MiniRacerCsim::Context` is paired with a native system thread that runs V8.
 
-Multiple Ruby threads can concurrently access the `MiniRacer::Context`.
+Multiple Ruby threads can concurrently access the `MiniRacerCsim::Context`.
 MiniRacer ensures mutual exclusion. Ruby threads won't trample each other.
 
 Ruby threads communicate with the V8 thread through a mutex-and-condition-variable
@@ -54,7 +54,7 @@ they are almost universally:
 deliberate changes & known bugs
 ===============================
 
-- `MiniRacer::Platform.set_flags! :single_threaded` runs V8 dispatches on a
+- `MiniRacerCsim::Platform.set_flags! :single_threaded` runs V8 dispatches on a
   reusable mini_racer-owned native thread. Pre-fork contexts may be used in the
   child only if the process forks while MiniRacer is quiescent; applications that
   fork from a multi-threaded process should guard all MiniRacer context
@@ -81,7 +81,7 @@ deliberate changes & known bugs
   equivalent to a byte buffer.
 
 - Not all JS objects are serializable/cloneable. Where possible, such objects
-  are substituted with a cloneable representation, else a `MiniRacer::RuntimeError`
+  are substituted with a cloneable representation, else a `MiniRacerCsim::RuntimeError`
   is raised.
 
   Promises, argument objects, map and set iterators, etc., are substituted,
@@ -89,7 +89,7 @@ deliberate changes & known bugs
   into arrays (map/set iterators.)
 
   Function objects are substituted with a marker so they can be represented
-  as `MiniRacer::JavaScriptFunction` objects on the Ruby side.
+  as `MiniRacerCsim::JavaScriptFunction` objects on the Ruby side.
 
   SharedArrayBuffers are not cloneable by design but aren't really usable in
   `mini_racer` in the first place (no way to share them between isolates.)

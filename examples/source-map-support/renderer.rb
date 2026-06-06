@@ -1,6 +1,6 @@
-require 'mini_racer'
+require 'mini_racer_csim'
 
-ctx = MiniRacer::Context.new
+ctx = MiniRacerCsim::Context.new
 
 # Make sure we pass the filename option so source-map-support can map properly
 ctx.eval(File.read('./dist/main.js'), filename: 'main.js')

@@ -1,11 +1,11 @@
 # coding: utf-8
 lib = File.expand_path("../lib", __FILE__)
 $LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
-require "mini_racer/version"
+require "mini_racer_csim/version"
 
 Gem::Specification.new do |spec|
   spec.name = "mini_racer-csim"
-  spec.version = MiniRacer::VERSION
+  spec.version = MiniRacerCsim::VERSION
   spec.authors = ["Keita Urashima", "Sam Saffron"]
   spec.email = ["ursm@ursm.jp"]
 
@@ -44,12 +44,12 @@ Gem::Specification.new do |spec|
   spec.add_development_dependency "activesupport", "> 6"
   spec.add_development_dependency "m"
 
-  spec.add_dependency "libv8-node", MiniRacer::LIBV8_NODE_VERSION
+  spec.add_dependency "libv8-node", MiniRacerCsim::LIBV8_NODE_VERSION
   spec.require_paths = %w[lib ext]
 
   spec.extensions = %w[
-    ext/mini_racer_loader/extconf.rb
-    ext/mini_racer_extension/extconf.rb
+    ext/mini_racer_csim_loader/extconf.rb
+    ext/mini_racer_csim_extension/extconf.rb
   ]
 
   spec.required_ruby_version = ">= 3.3"

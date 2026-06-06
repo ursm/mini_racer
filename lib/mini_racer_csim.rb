@@ -1,7 +1,7 @@
-require "mini_racer/version"
+require "mini_racer_csim/version"
 require "pathname"
 
-module MiniRacer
+module MiniRacerCsim
   class Binary
     attr_reader :data
 
@@ -12,16 +12,18 @@ module MiniRacer
   end
 end
 
-# mini_racer-csim is a hard fork: V8 (CRuby C extension) only. The TruffleRuby
-# backend was dropped — see lib/mini_racer/truffleruby.rb in upstream history.
+# mini_racer-csim is a hard fork of mini_racer with its own require path and
+# `MiniRacerCsim` namespace (and `mini_racer_csim_*` C extensions), so it never
+# collides with — and loads deterministically alongside — upstream mini_racer.
+# V8 (CRuby C extension) only; the TruffleRuby backend was dropped.
 if ENV["LD_PRELOAD"].to_s.include?("malloc")
-  require "mini_racer_extension"
+  require "mini_racer_csim_extension"
 else
-  require "mini_racer_loader"
-  ext_filename = "mini_racer_extension.#{RbConfig::CONFIG["DLEXT"]}"
-  # This is the mini_racer-csim fork; fall back to the upstream name and then
-  # to the default require_paths so the extension is found however we're loaded.
-  spec = Gem.loaded_specs["mini_racer-csim"] || Gem.loaded_specs["mini_racer"]
+  require "mini_racer_csim_loader"
+  ext_filename = "mini_racer_csim_extension.#{RbConfig::CONFIG["DLEXT"]}"
+  # Resolve the extension from the gem's own require_paths, falling back to the
+  # default lib/ext layout so it is found however we're loaded.
+  spec = Gem.loaded_specs["mini_racer-csim"]
   ext_path =
     (spec ? spec.require_paths : %w[lib ext]).map do |p|
       (p = Pathname.new(p)).absolute? ? p : Pathname.new(__dir__).parent + p
@@ -32,14 +34,14 @@ else
     raise LoadError,
           "Could not find #{ext_filename} in #{ext_path.map(&:to_s)}"
   end
-  MiniRacer::Loader.load(ext_found.to_s)
+  MiniRacerCsim::Loader.load(ext_found.to_s)
 end
 
 require "thread"
 require "json"
 require "io/wait"
 
-module MiniRacer
+module MiniRacerCsim
   class Error < ::StandardError; end
 
   class ContextDisposedError < Error; end

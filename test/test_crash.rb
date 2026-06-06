@@ -1,8 +1,8 @@
 $LOAD_PATH.unshift File.expand_path('../../lib', __FILE__)
-require 'mini_racer'
+require 'mini_racer_csim'
 
 def test
-  context = MiniRacer::Context.new(timeout: 10)
+  context = MiniRacerCsim::Context.new(timeout: 10)
   context.attach("echo", proc{ |msg|
     GC.start
     msg
@@ -21,7 +21,7 @@ end
 
 def test2
 
-  context = MiniRacer::Context.new(timeout: 5)
+  context = MiniRacerCsim::Context.new(timeout: 5)
 
   context.attach("marsh", proc do |a, b, c|
     a[rand(10000).to_s] = "a"
@@ -39,7 +39,7 @@ def test2
 end
 
 def test3
-  snapshot = MiniRacer::Snapshot.new('Math.sin = 1;')
+  snapshot = MiniRacerCsim::Snapshot.new('Math.sin = 1;')
 
   begin
     snapshot.warmup!('var a = Math.sin(1);')
@@ -47,7 +47,7 @@ def test3
     # do nothing
   end
 
-  context = MiniRacer::Context.new(snapshot: snapshot)
+  context = MiniRacerCsim::Context.new(snapshot: snapshot)
 
   assert_equal 1, context.eval('Math.sin')
 end

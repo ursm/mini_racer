@@ -18,13 +18,13 @@ enum
 
 static const uint16_t js_function_marker[] = {0xBFF,'J','a','v','a','S','c','r','i','p','t','F','u','n','c','t','i','o','n'};
 
-// defined in mini_racer_extension.c, opaque to mini_racer_v8.cc
+// defined in mini_racer_csim_extension.c, opaque to mini_racer_v8.cc
 struct Context;
 
-// defined in mini_racer_v8.cc, opaque to mini_racer_extension.c
+// defined in mini_racer_v8.cc, opaque to mini_racer_csim_extension.c
 struct State;
 
-// defined in mini_racer_extension.c
+// defined in mini_racer_csim_extension.c
 extern int single_threaded;
 void v8_get_flags(char **p, size_t *n);
 void v8_thread_main(struct Context *c, struct State *pst);

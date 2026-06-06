@@ -6,18 +6,18 @@ require "test_helper"
 
 class MiniRacerTest < Minitest::Test
   # see `test_platform_set_flags_works` below
-  MiniRacer::Platform.set_flags! :use_strict
+  MiniRacerCsim::Platform.set_flags! :use_strict
 
   # --stress_snapshot works around a bogus debug assert in V8
   # that terminates the process with the following error:
   #
   # Fatal error in ../deps/v8/src/heap/read-only-spaces.cc, line 70
   # Check failed: read_only_blob_checksum_ == snapshot_checksum (<unprintable> vs. 1099685679).
-  MiniRacer::Platform.set_flags! :stress_snapshot
+  MiniRacerCsim::Platform.set_flags! :stress_snapshot
 
   def test_locale_mx
     val =
-      MiniRacer::Context.new.eval(
+      MiniRacerCsim::Context.new.eval(
         "new Date('April 28 2021').toLocaleDateString('es-MX');"
       )
     assert_equal "28/4/2021", val
@@ -25,7 +25,7 @@ class MiniRacerTest < Minitest::Test
 
   def test_locale_us
     val =
-      MiniRacer::Context.new.eval(
+      MiniRacerCsim::Context.new.eval(
         "new Date('April 28 2021').toLocaleDateString('en-US');"
       )
     assert_equal "4/28/2021", val
@@ -35,7 +35,7 @@ class MiniRacerTest < Minitest::Test
     # TODO: this causes a segfault on Linux
 
     val =
-      MiniRacer::Context.new.eval(
+      MiniRacerCsim::Context.new.eval(
         "new Date('April 28 2021').toLocaleDateString('fr-FR');"
       )
     assert_equal "28/04/2021", val
@@ -45,20 +45,20 @@ class MiniRacerTest < Minitest::Test
     skip "running this test is very slow"
     # 5000.times do
     #   GC.start
-    #   context = MiniRacer::Context.new(timeout: 5)
+    #   context = MiniRacerCsim::Context.new(timeout: 5)
     #   context.attach("echo", proc{|msg| msg.to_sym.to_s})
-    #   assert_raises(MiniRacer::EvalError) do
+    #   assert_raises(MiniRacerCsim::EvalError) do
     #     context.eval("while(true) echo('foo');")
     #   end
     # end
   end
 
   def test_that_it_has_a_version_number
-    refute_nil ::MiniRacer::VERSION
+    refute_nil ::MiniRacerCsim::VERSION
   end
 
   def test_types
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     assert_equal 2, context.eval("2")
     assert_equal "two", context.eval('"two"')
     assert_equal 2.1, context.eval("2.1")
@@ -69,17 +69,17 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_nil_context
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     assert_raises(TypeError) { assert_equal 2, context.eval(nil) }
   end
 
   def test_array
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     assert_equal [1, "two"], context.eval('[1,"two"]')
   end
 
   def test_object
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     # remember JavaScript is quirky {"1" : 1} magically turns to {1: 1} cause magic
     assert_equal(
       { "1" => 2, "two" => "two" },
@@ -88,7 +88,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_it_returns_runtime_error
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     exp = nil
 
     begin
@@ -97,7 +97,7 @@ class MiniRacerTest < Minitest::Test
       exp = e
     end
 
-    assert_equal MiniRacer::RuntimeError, exp.class
+    assert_equal MiniRacerCsim::RuntimeError, exp.class
 
     assert_match(/boom/, exp.message)
     assert_match(/foo/, exp.backtrace[0])
@@ -108,7 +108,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_it_can_stop
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     exp = nil
 
     begin
@@ -121,40 +121,40 @@ class MiniRacerTest < Minitest::Test
       exp = e
     end
 
-    assert_equal MiniRacer::ScriptTerminatedError, exp.class
+    assert_equal MiniRacerCsim::ScriptTerminatedError, exp.class
     assert_match(/terminated/, exp.message)
   end
 
   def test_it_can_timeout_during_serialization
-    context = MiniRacer::Context.new(timeout: 500)
+    context = MiniRacerCsim::Context.new(timeout: 500)
 
-    assert_raises(MiniRacer::ScriptTerminatedError) do
+    assert_raises(MiniRacerCsim::ScriptTerminatedError) do
       context.eval "var a = {get a(){ while(true); }}; a"
     end
   end
 
   def test_it_can_automatically_time_out_context
     # 2 millisecs is a very short timeout but we don't want test running forever
-    context = MiniRacer::Context.new(timeout: 2)
+    context = MiniRacerCsim::Context.new(timeout: 2)
     assert_raises { context.eval("while(true){}") }
   end
 
   def test_returns_javascript_function
-    context = MiniRacer::Context.new
-    assert_same MiniRacer::JavaScriptFunction,
+    context = MiniRacerCsim::Context.new
+    assert_same MiniRacerCsim::JavaScriptFunction,
                 context.eval("var a = function(){}; a").class
   end
 
   def test_it_handles_malformed_js
-    context = MiniRacer::Context.new
-    assert_raises MiniRacer::ParseError do
+    context = MiniRacerCsim::Context.new
+    assert_raises MiniRacerCsim::ParseError do
       context.eval("I am not JavaScript {")
     end
   end
 
   def test_it_handles_malformed_js_with_backtrace
-    context = MiniRacer::Context.new
-    assert_raises MiniRacer::ParseError do
+    context = MiniRacerCsim::Context.new
+    assert_raises MiniRacerCsim::ParseError do
       begin
         context.eval("var i;\ni=2;\nI am not JavaScript {")
       rescue => e
@@ -166,25 +166,25 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_it_remembers_stuff_in_context
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("var x = function(){return 22;}")
     assert_equal 22, context.eval("x()")
   end
 
   def test_can_attach_functions
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval "var adder"
     context.attach("adder", proc { |a, b| a + b })
     assert_equal 3, context.eval("adder(1,2)")
   end
 
   def test_es6_arrow_functions
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     assert_equal 42, context.eval("var adder=(x,y)=>x+y; adder(21,21);")
   end
 
   def test_concurrent_access
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("var counter=0; var plus=()=>counter++;")
 
     (1..10).map { Thread.new { context.eval("plus()") } }.each(&:join)
@@ -199,7 +199,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_attached_exceptions
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("adder", proc { raise FooError, "I like foos" })
     assert_raises do
       begin
@@ -215,28 +215,28 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_attached_on_object
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval "var minion"
     context.attach("minion.speak", proc { "banana" })
     assert_equal "banana", context.eval("minion.speak()")
   end
 
   def test_attached_on_nested_object
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval "var minion"
     context.attach("minion.kevin.speak", proc { "banana" })
     assert_equal "banana", context.eval("minion.kevin.speak()")
   end
 
   def test_return_arrays
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval "var nose"
     context.attach("nose.type", proc { ["banana", ["nose"]] })
     assert_equal ["banana", ["nose"]], context.eval("nose.type()")
   end
 
   def test_return_hash
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach(
       "test",
       proc { { :banana => :nose, "inner" => { 42 => 42 } } }
@@ -250,12 +250,12 @@ class MiniRacerTest < Minitest::Test
   def test_date_nan
     # NoMethodError: undefined method `source_location' for "<internal:core>
     # core/float.rb:114:in `to_i'":Thread::Backtrace::Location
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     assert_raises(RangeError) { context.eval("new Date(NaN)") } # should not crash process
   end
 
   def test_return_date
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     test_time = Time.new
     test_datetime = test_time.to_datetime
     context.attach("test", proc { test_time })
@@ -295,7 +295,7 @@ class MiniRacerTest < Minitest::Test
 
     begin
       # no exceptions should happen here, and non-datetime classes should marshall correctly still.
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       test_time = Time.new
       context.attach("test", proc { test_time })
 
@@ -317,7 +317,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_return_large_number
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     test_num = 1_000_000_000_000_000
     context.attach("test", proc { test_num })
 
@@ -326,7 +326,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_return_int_max
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     test_num = 2**(31) - 1 #last int32 number
     context.attach("test", proc { test_num })
 
@@ -335,7 +335,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_return_unknown
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     test_unknown = Date.new # hits T_DATA in convert_ruby_to_v8
     context.attach("test", proc { test_unknown })
     assert_equal("Undefined Conversion", context.eval("test()"))
@@ -344,16 +344,16 @@ class MiniRacerTest < Minitest::Test
     context = nil
     GC.start
 
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     test_unknown = Date.new # hits T_DATA in convert_ruby_to_v8
     context.attach("test", proc { test_unknown })
     assert_equal("Undefined Conversion", context.eval("test()"))
   end
 
   def test_max_memory
-    context = MiniRacer::Context.new(max_memory: 200_000_000)
+    context = MiniRacerCsim::Context.new(max_memory: 200_000_000)
 
-    assert_raises(MiniRacer::V8OutOfMemoryError) do
+    assert_raises(MiniRacerCsim::V8OutOfMemoryError) do
       context.eval(
         "let s = 1000; var a = new Array(s); a.fill(0); while(true) {s *= 1.1; let n = new Array(Math.floor(s)); n.fill(0); a = a.concat(n); };"
       )
@@ -361,7 +361,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_max_memory_for_call
-    context = MiniRacer::Context.new(max_memory: 100_000_000)
+    context = MiniRacerCsim::Context.new(max_memory: 100_000_000)
     context.eval(<<~JS)
       let s;
       function memory_test() {
@@ -382,17 +382,17 @@ class MiniRacerTest < Minitest::Test
       }
     JS
     context.call("set_s", 1000)
-    assert_raises(MiniRacer::V8OutOfMemoryError) { context.call("memory_test") }
+    assert_raises(MiniRacerCsim::V8OutOfMemoryError) { context.call("memory_test") }
     s = context.eval("s")
     assert_operator(s, :>, 100_000)
   end
 
   def test_max_memory_bounds
     assert_raises(ArgumentError) do
-      MiniRacer::Context.new(max_memory: -200_000_000)
+      MiniRacerCsim::Context.new(max_memory: -200_000_000)
     end
 
-    assert_raises(ArgumentError) { MiniRacer::Context.new(max_memory: 2**32) }
+    assert_raises(ArgumentError) { MiniRacerCsim::Context.new(max_memory: 2**32) }
   end
 
   module Echo
@@ -402,28 +402,28 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_can_attach_method
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval "var Echo"
     context.attach("Echo.say", Echo.method(:say))
     assert_equal "hello", context.eval("Echo.say('hello')")
   end
 
   def test_attach_non_object
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("var minion = 2")
     context.attach("minion.kevin.speak", proc { "banana" })
     assert_equal "banana", context.call("minion.kevin.speak")
   end
 
   def test_load
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.load(File.dirname(__FILE__) + "/file.js")
     assert_equal "world", context.eval("hello")
     assert_raises { context.load(File.dirname(__FILE__) + "/missing.js") }
   end
 
   def test_contexts_can_be_safely_GCed
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval 'var hello = "world";'
 
     context = nil
@@ -432,18 +432,18 @@ class MiniRacerTest < Minitest::Test
 
   def test_it_can_use_snapshots
     snapshot =
-      MiniRacer::Snapshot.new(
+      MiniRacerCsim::Snapshot.new(
         'function hello() { return "world"; }; var foo = "bar";'
       )
 
-    context = MiniRacer::Context.new(snapshot: snapshot)
+    context = MiniRacerCsim::Context.new(snapshot: snapshot)
 
     assert_equal "world", context.eval("hello()")
     assert_equal "bar", context.eval("foo")
   end
 
   def test_snapshot_size
-    snapshot = MiniRacer::Snapshot.new('var foo = "bar";')
+    snapshot = MiniRacerCsim::Snapshot.new('var foo = "bar";')
 
     # for some reason sizes seem to change across runs, so we just
     # check it's a positive integer
@@ -451,7 +451,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_snapshot_dump
-    snapshot = MiniRacer::Snapshot.new('var foo = "bar";')
+    snapshot = MiniRacerCsim::Snapshot.new('var foo = "bar";')
     dump = snapshot.dump
 
     assert_equal(String, dump.class)
@@ -460,39 +460,39 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_snapshot_load
-    snapshot = MiniRacer::Snapshot.new('var foo = "bar"; function hello() { return "world"; }')
+    snapshot = MiniRacerCsim::Snapshot.new('var foo = "bar"; function hello() { return "world"; }')
     blob = snapshot.dump
 
-    restored = MiniRacer::Snapshot.load(blob)
+    restored = MiniRacerCsim::Snapshot.load(blob)
 
     assert_equal(snapshot.size, restored.size)
     assert_equal(Encoding::ASCII_8BIT, restored.dump.encoding)
     assert(restored.dump.valid_encoding?, "restored snapshot dump should have valid encoding")
-    ctx = MiniRacer::Context.new(snapshot: restored)
+    ctx = MiniRacerCsim::Context.new(snapshot: restored)
     assert_equal("bar", ctx.eval("foo"))
     assert_equal("world", ctx.eval("hello()"))
   end
 
   def test_snapshot_load_with_non_binary_encoding
-    snapshot = MiniRacer::Snapshot.new('var foo = "bar";')
+    snapshot = MiniRacerCsim::Snapshot.new('var foo = "bar";')
     # Force non-binary encoding to exercise the coderange fix.
     # Binary data interpreted as UTF-8 will have broken encoding.
     blob = snapshot.dump.dup.force_encoding("UTF-8")
     assert_equal(Encoding::UTF_8, blob.encoding)
     assert(!blob.valid_encoding?, "test precondition: blob should have broken UTF-8 encoding")
 
-    restored = MiniRacer::Snapshot.load(blob)
+    restored = MiniRacerCsim::Snapshot.load(blob)
 
     assert_equal(Encoding::ASCII_8BIT, restored.dump.encoding)
     assert(restored.dump.valid_encoding?, "restored snapshot should have valid binary encoding")
-    ctx = MiniRacer::Context.new(snapshot: restored)
+    ctx = MiniRacerCsim::Context.new(snapshot: restored)
     assert_equal("bar", ctx.eval("foo"))
   end
 
   def test_invalid_snapshots_throw_an_exception
     begin
-      MiniRacer::Snapshot.new("var foo = bar;")
-    rescue MiniRacer::SnapshotError => e
+      MiniRacerCsim::Snapshot.new("var foo = bar;")
+    rescue MiniRacerCsim::SnapshotError => e
       assert(e.backtrace[0].include? "JavaScript")
       got_error = true
     end
@@ -501,8 +501,8 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_an_empty_snapshot_is_valid
-    MiniRacer::Snapshot.new("")
-    MiniRacer::Snapshot.new
+    MiniRacerCsim::Snapshot.new("")
+    MiniRacerCsim::Snapshot.new
     GC.start
   end
 
@@ -513,7 +513,7 @@ class MiniRacerTest < Minitest::Test
       var a = 5;
     JS
 
-    snapshot = MiniRacer::Snapshot.new(snapshot_source)
+    snapshot = MiniRacerCsim::Snapshot.new(snapshot_source)
 
     warmup_source = <<-JS
       Math.tan(1);
@@ -523,7 +523,7 @@ class MiniRacerTest < Minitest::Test
 
     warmed_up_snapshot = snapshot.warmup!(warmup_source)
 
-    context = MiniRacer::Context.new(snapshot: snapshot)
+    context = MiniRacerCsim::Context.new(snapshot: snapshot)
 
     assert_equal 5, context.eval("a")
     assert_equal "function", context.eval("typeof(Math.sin)")
@@ -531,19 +531,19 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_invalid_warmup_sources_throw_an_exception
-    assert_raises(MiniRacer::SnapshotError) do
-      MiniRacer::Snapshot.new("Math.sin = 1;").warmup!("var a = Math.sin(1);")
+    assert_raises(MiniRacerCsim::SnapshotError) do
+      MiniRacerCsim::Snapshot.new("Math.sin = 1;").warmup!("var a = Math.sin(1);")
     end
   end
 
   def test_invalid_warmup_sources_throw_an_exception_2
     assert_raises(TypeError) do
-      MiniRacer::Snapshot.new("function f() { return 1 }").warmup!([])
+      MiniRacerCsim::Snapshot.new("function f() { return 1 }").warmup!([])
     end
   end
 
   def test_warming_up_with_invalid_source_does_not_affect_the_snapshot_internal_state
-    snapshot = MiniRacer::Snapshot.new("Math.sin = 1;")
+    snapshot = MiniRacerCsim::Snapshot.new("Math.sin = 1;")
 
     begin
       snapshot.warmup!("var a = Math.sin(1);")
@@ -551,14 +551,14 @@ class MiniRacerTest < Minitest::Test
       # do nothing
     end
 
-    context = MiniRacer::Context.new(snapshot: snapshot)
+    context = MiniRacerCsim::Context.new(snapshot: snapshot)
 
     assert_equal 1, context.eval("Math.sin")
   end
 
   def test_snapshots_can_be_GCed_without_affecting_contexts_created_from_them
-    snapshot = MiniRacer::Snapshot.new("Math.sin = 1;")
-    context = MiniRacer::Context.new(snapshot: snapshot)
+    snapshot = MiniRacerCsim::Snapshot.new("Math.sin = 1;")
+    context = MiniRacerCsim::Context.new(snapshot: snapshot)
 
     # force the snapshot to be GC'ed
     snapshot = nil
@@ -576,7 +576,7 @@ class MiniRacerTest < Minitest::Test
       var a = 5;
     JS
 
-    snapshot = MiniRacer::Snapshot.new(snapshot_source)
+    snapshot = MiniRacerCsim::Snapshot.new(snapshot_source)
 
     warmump_source = <<-JS
       Math.tan(1);
@@ -586,14 +586,14 @@ class MiniRacerTest < Minitest::Test
 
     snapshot.warmup!(warmump_source)
 
-    context1 = MiniRacer::Context.new(snapshot: snapshot)
+    context1 = MiniRacerCsim::Context.new(snapshot: snapshot)
 
     assert_equal 5, context1.eval("a")
     assert_equal "function", context1.eval("typeof(Math.sin)")
 
     GC.start
 
-    context2 = MiniRacer::Context.new(snapshot: snapshot)
+    context2 = MiniRacerCsim::Context.new(snapshot: snapshot)
 
     assert_equal 5, context2.eval("a")
     assert_equal "function", context2.eval("typeof(Math.sin)")
@@ -601,25 +601,25 @@ class MiniRacerTest < Minitest::Test
 
   def test_platform_set_flags_raises_an_exception_if_already_initialized
     # makes sure it's initialized
-    MiniRacer::Snapshot.new
+    MiniRacerCsim::Snapshot.new
 
-    assert_raises(MiniRacer::PlatformAlreadyInitialized) do
-      MiniRacer::Platform.set_flags! :noconcurrent_recompilation
+    assert_raises(MiniRacerCsim::PlatformAlreadyInitialized) do
+      MiniRacerCsim::Platform.set_flags! :noconcurrent_recompilation
     end
   end
 
   def test_platform_set_flags_works
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
 
-    assert_raises(MiniRacer::RuntimeError) do
+    assert_raises(MiniRacerCsim::RuntimeError) do
       # should fail because of strict mode set for all these tests
       context.eval "x = 28"
     end
   end
 
   def test_error_on_return_val
-    v8 = MiniRacer::Context.new
-    assert_raises(MiniRacer::RuntimeError) do
+    v8 = MiniRacerCsim::Context.new
+    assert_raises(MiniRacerCsim::RuntimeError) do
       v8.eval(
         'var o = {}; o.__defineGetter__("bar", function() { return null(); }); o'
       )
@@ -627,7 +627,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_ruby_based_property_in_rval
-    v8 = MiniRacer::Context.new
+    v8 = MiniRacerCsim::Context.new
     v8.attach "echo", proc { |x| x }
     assert_equal(
       { "bar" => 42 },
@@ -636,22 +636,22 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_function_rval
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("echo", proc { |msg| msg })
     assert_equal("foo", context.eval("echo('foo')"))
   end
 
   def test_timeout_in_ruby_land
     skip "TODO(bnoordhuis) need to think on how to interrupt ruby code"
-    context = MiniRacer::Context.new(timeout: 50)
+    context = MiniRacerCsim::Context.new(timeout: 50)
     context.attach("sleep", proc { sleep 10 })
-    assert_raises(MiniRacer::ScriptTerminatedError) do
+    assert_raises(MiniRacerCsim::ScriptTerminatedError) do
       context.eval('sleep(); "hi";')
     end
   end
 
   def test_undef_mem
-    context = MiniRacer::Context.new(timeout: 5)
+    context = MiniRacerCsim::Context.new(timeout: 5)
 
     context.attach(
       "marsh",
@@ -672,13 +672,13 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_can_dispose_context
-    context = MiniRacer::Context.new(timeout: 5)
+    context = MiniRacerCsim::Context.new(timeout: 5)
     context.dispose
-    assert_raises(MiniRacer::ContextDisposedError) { context.eval("a") }
+    assert_raises(MiniRacerCsim::ContextDisposedError) { context.eval("a") }
   end
 
   def test_estimated_size
-    context = MiniRacer::Context.new(timeout: 500)
+    context = MiniRacerCsim::Context.new(timeout: 500)
     context.eval(<<~JS)
       let a='testing';
       let f=function(foo) { foo + 42 };
@@ -720,7 +720,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_releasing_memory
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
 
     context.low_memory_notification
 
@@ -739,11 +739,11 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_bad_params
-    assert_raises { MiniRacer::Context.new(random: :thing) }
+    assert_raises { MiniRacerCsim::Context.new(random: :thing) }
   end
 
   def test_ensure_gc
-    context = MiniRacer::Context.new(ensure_gc_after_idle: 1)
+    context = MiniRacerCsim::Context.new(ensure_gc_after_idle: 1)
     context.low_memory_notification
 
     start_heap = context.heap_stats[:used_heap_size]
@@ -761,13 +761,13 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_eval_with_filename
-    context = MiniRacer::Context.new()
+    context = MiniRacerCsim::Context.new()
     context.eval("var foo = function(){baz();}", filename: "b/c/foo1.js")
 
     got_error = false
     begin
       context.eval("foo()", filename: "baz1.js")
-    rescue MiniRacer::RuntimeError => e
+    rescue MiniRacerCsim::RuntimeError => e
       assert_match(/foo1.js/, e.backtrace[0])
       assert_match(/baz1.js/, e.backtrace[1])
       got_error = true
@@ -777,11 +777,11 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_estimated_size_when_disposed
-    context = MiniRacer::Context.new(timeout: 50)
+    context = MiniRacerCsim::Context.new(timeout: 50)
     context.eval("let a='testing';")
     context.dispose
 
-    assert_raises(MiniRacer::ContextDisposedError) { context.heap_stats }
+    assert_raises(MiniRacerCsim::ContextDisposedError) { context.heap_stats }
   end
 
   def test_can_dispose
@@ -795,13 +795,13 @@ class MiniRacerTest < Minitest::Test
 
   def junk_it_up
     1000.times do
-      context = MiniRacer::Context.new(timeout: 5)
+      context = MiniRacerCsim::Context.new(timeout: 5)
       context.dispose
     end
   end
 
   def test_attached_recursion
-    context = MiniRacer::Context.new(timeout: 200)
+    context = MiniRacerCsim::Context.new(timeout: 200)
     context.attach("a", proc { |a| a })
     context.attach("b", proc { |a| a })
 
@@ -813,7 +813,7 @@ class MiniRacerTest < Minitest::Test
     path = f.path
     f.unlink
 
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("let x = 1000;")
     context.write_heap_snapshot(path)
 
@@ -828,18 +828,18 @@ class MiniRacerTest < Minitest::Test
     # in Ruby 2.7 pipes will stay open for longer
     # make sure that we clean up early so pipe file
     # descriptors are not kept around
-    context = MiniRacer::Context.new(timeout: 1000)
+    context = MiniRacerCsim::Context.new(timeout: 1000)
     10_000.times { |i| context.eval("'hello'") }
   end
 
   def test_symbol_support
-    context = MiniRacer::Context.new()
+    context = MiniRacerCsim::Context.new()
     assert_equal "foo", context.eval("Symbol('foo')")
     assert_nil context.eval("Symbol()") # should not crash
   end
 
   def test_infinite_object_js
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("a", proc { |a| a })
 
     js = <<~JS
@@ -852,24 +852,24 @@ class MiniRacerTest < Minitest::Test
       a(get({}));
     JS
 
-    assert_raises(MiniRacer::RuntimeError) { context.eval(js) }
+    assert_raises(MiniRacerCsim::RuntimeError) { context.eval(js) }
   end
 
   def test_deep_object_js
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("a", proc { |a| a })
 
     # stack depth should be enough to marshal the object
     assert_equal [[[]]], context.eval("let arr = [[[]]]; a(arr)")
 
     # too deep
-    assert_raises(MiniRacer::RuntimeError) do
+    assert_raises(MiniRacerCsim::RuntimeError) do
       context.eval("let arr = [[[[[[[[]]]]]]]]; a(arr)")
     end
   end
 
   def test_wasm_ref
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     expected = {}
     actual =
       context.eval(
@@ -897,13 +897,13 @@ class MiniRacerTest < Minitest::Test
       };
       (new MyProxy([])).function_call(new MyProxy([])-1)
     JS
-    context = MiniRacer::Context.new()
+    context = MiniRacerCsim::Context.new()
     context.attach("myFunctionLogger", ->(property) {})
     context.eval(js)
   end
 
   def test_proxy_uncloneable
-    context = MiniRacer::Context.new()
+    context = MiniRacerCsim::Context.new()
     expected = { "x" => 42 }
     assert_equal expected, context.eval(<<~JS)
       const o = {x: 42}
@@ -913,7 +913,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_promise
-    context = MiniRacer::Context.new()
+    context = MiniRacerCsim::Context.new()
     context.eval <<~JS
       var x = 0;
       async function test() {
@@ -928,12 +928,12 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_perform_microtask_checkpoint_returns_nil
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     assert_nil(context.perform_microtask_checkpoint)
   end
 
   def test_perform_microtask_checkpoint_drains_from_callback
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     seen    = []
 
     context.attach('note',  ->(s) { seen << s })
@@ -951,11 +951,11 @@ class MiniRacerTest < Minitest::Test
 
   # Creates a context with the host namespace installed.
   def host_namespace_context(host_namespace: "MiniRacer", **options)
-    MiniRacer::Context.new(host_namespace: host_namespace, **options)
+    MiniRacerCsim::Context.new(host_namespace: host_namespace, **options)
   end
 
   def test_host_namespace_not_installed_by_default
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
 
     # Opt-in only: without host_namespace nothing is injected. (drainMicrotasks
     # is the real method name; assert it never leaks as a bare global either.)
@@ -964,14 +964,14 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_host_namespace_false_or_empty_is_off
-    assert_equal("undefined", MiniRacer::Context.new(host_namespace: false).eval("typeof MiniRacer"))
-    assert_equal("undefined", MiniRacer::Context.new(host_namespace: "").eval("typeof MiniRacer"))
+    assert_equal("undefined", MiniRacerCsim::Context.new(host_namespace: false).eval("typeof MiniRacer"))
+    assert_equal("undefined", MiniRacerCsim::Context.new(host_namespace: "").eval("typeof MiniRacer"))
   end
 
   def test_host_namespace_rejects_invalid_type
     # A non-String/Symbol name is a type error (C Check_Type raises TypeError).
     assert_raises(TypeError, ArgumentError) do
-      MiniRacer::Context.new(host_namespace: 123)
+      MiniRacerCsim::Context.new(host_namespace: 123)
     end
   end
 
@@ -980,7 +980,7 @@ class MiniRacerTest < Minitest::Test
     # `<name>.drainMicrotasks()`, so they are rejected up front.
     ["foo-bar", "foo.bar", "123abc", "with space", "a/b"].each do |name|
       assert_raises(ArgumentError) do
-        MiniRacer::Context.new(host_namespace: name)
+        MiniRacerCsim::Context.new(host_namespace: name)
       end
     end
   end
@@ -1077,7 +1077,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_host_namespace_installed_on_snapshot_backed_context
-    snapshot = MiniRacer::Snapshot.new("var fromSnapshot = 42;")
+    snapshot = MiniRacerCsim::Snapshot.new("var fromSnapshot = 42;")
     context = host_namespace_context(snapshot: snapshot)
 
     # The namespace closes over native pointers and is not part of the
@@ -1095,7 +1095,7 @@ class MiniRacerTest < Minitest::Test
     # from the inline drain: were drainMicrotasks() a no-op, the kAuto
     # checkpoint at script end would still terminate, but reached_after would
     # already be true.
-    assert_raises(MiniRacer::ScriptTerminatedError) do
+    assert_raises(MiniRacerCsim::ScriptTerminatedError) do
       context.eval(<<~JS)
         globalThis.reached_after = false;
         Promise.resolve().then(() => { while (true) {} });
@@ -1112,7 +1112,7 @@ class MiniRacerTest < Minitest::Test
 
     # Same as above for the out-of-memory path (v8_gc_callback), which the
     # README documents alongside watchdog termination.
-    assert_raises(MiniRacer::V8OutOfMemoryError) do
+    assert_raises(MiniRacerCsim::V8OutOfMemoryError) do
       context.eval(<<~JS)
         globalThis.reached_after = false;
         Promise.resolve().then(() => {
@@ -1128,7 +1128,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def reset_realm_context(**options)
-    MiniRacer::Context.new(**options)
+    MiniRacerCsim::Context.new(**options)
   end
 
   def test_reset_realm_clears_globals_but_keeps_eval_working
@@ -1172,7 +1172,7 @@ class MiniRacerTest < Minitest::Test
     # Resetting the realm while a JS->Ruby callback is suspended mid-roundtrip
     # would swap the realm out from under the callback frame; it must be refused.
     context.attach("boom", proc { context.reset_realm })
-    error = assert_raises(MiniRacer::RuntimeError) { context.eval("boom()") }
+    error = assert_raises(MiniRacerCsim::RuntimeError) { context.eval("boom()") }
     assert_match(/within a host function callback/, error.message)
 
     # The context must remain healthy after the refusal.
@@ -1188,7 +1188,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_reset_realm_restores_snapshot_globals
-    snapshot = MiniRacer::Snapshot.new("globalThis.VENDOR = { ok: 7 };")
+    snapshot = MiniRacerCsim::Snapshot.new("globalThis.VENDOR = { ok: 7 };")
     context = reset_realm_context(snapshot: snapshot)
 
     assert_equal(7, context.eval("VENDOR.ok"))
@@ -1255,18 +1255,18 @@ class MiniRacerTest < Minitest::Test
     assert_operator(final, :<, baseline * 2)
   end
 
-  # -- per-frame realms (Context#create_realm / MiniRacer::Realm) --
+  # -- per-frame realms (Context#create_realm / MiniRacerCsim::Realm) --
 
   def test_create_realm_returns_a_realm
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     realm = ctx.create_realm
-    assert_kind_of MiniRacer::Realm, realm
+    assert_kind_of MiniRacerCsim::Realm, realm
     assert_kind_of Integer, realm.id
     assert_equal 3, realm.eval("1 + 2")
   end
 
   def test_realm_global_is_isolated_from_the_main_realm
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     ctx.eval("globalThis.x = 1")
     realm = ctx.create_realm
     assert_equal "undefined", realm.eval("typeof globalThis.x")
@@ -1276,14 +1276,14 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_inherits_attached_host_functions
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     ctx.attach("hostAdd", ->(a, b) { a + b })
     realm = ctx.create_realm
     assert_equal 5, realm.eval("hostAdd(2, 3)")
   end
 
   def test_realm_call_and_attach
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     realm = ctx.create_realm
     realm.eval("globalThis.f = (a) => a * 10")
     assert_equal 40, realm.call("f", 4)
@@ -1292,7 +1292,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_multiple_realms_are_independent
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
     refute_equal a.id, b.id
@@ -1303,17 +1303,17 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_dispose
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     realm = ctx.create_realm
     refute realm.disposed?
     realm.dispose
     assert realm.disposed?
-    assert_raises(MiniRacer::Error) { realm.eval("1") }
+    assert_raises(MiniRacerCsim::Error) { realm.eval("1") }
     realm.dispose # idempotent
   end
 
   def test_realm_global_is_live_and_shared_cross_realm
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
     b.eval("globalThis.shared = { n: 42 }")
@@ -1326,7 +1326,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_global_cross_realm_function_call
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
     b.eval("globalThis.inc = (x) => x + 1")
@@ -1335,20 +1335,20 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_global_reaches_main_realm
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     ctx.eval("globalThis.m = 7")
     a = ctx.create_realm
     assert_equal 7, a.eval("__mr_realmGlobal(0).m")
   end
 
   def test_realm_global_unknown_realm_is_undefined
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     a = ctx.create_realm
     assert_equal "undefined", a.eval("typeof __mr_realmGlobal(99999)")
   end
 
   def test_realm_has_independent_intrinsics
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
     a.eval("globalThis.B = #{b.id}")
@@ -1361,7 +1361,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_create_realm_is_reentrant_from_a_host_function
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     made = nil
     # Lazy model: a host function (called mid-eval) creates a realm. This must
     # not corrupt the suspended outer frame (it used to SEGV via a dangling
@@ -1378,7 +1378,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_eval_is_reentrant_with_continuing_outer_eval
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     # A host function (mid-eval) creates a realm and evals in it, then the outer
     # eval *continues*. The re-entrant Realm#eval must restore the caller's V8
     # context or the resuming outer frame SEGVs (sibling of the create_realm bug).
@@ -1391,7 +1391,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_reentrant_then_outer_cross_realm_access
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     made = nil
     ctx.attach("mk", lambda {
       made = ctx.create_realm
@@ -1411,7 +1411,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_unhandled_rejection_fires_per_realm
-    ctx = MiniRacer::Context.new(host_namespace: "MiniRacer")
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     a = ctx.create_realm
     b = ctx.create_realm
     # Each realm's bridge wires the unhandledrejection hook (csim's role).
@@ -1429,7 +1429,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_handled_rejection_is_not_reported
-    ctx = MiniRacer::Context.new(host_namespace: "MiniRacer")
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     r = ctx.create_realm
     r.eval(<<~JS)
       globalThis.caught = [];
@@ -1442,7 +1442,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_of_returns_creation_realm
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     a = ctx.create_realm
     b = ctx.create_realm
     a.eval("globalThis.B = #{b.id}")
@@ -1453,7 +1453,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_of_attributes_callback_to_its_creation_realm
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     f0 = ctx.create_realm
     f1 = ctx.create_realm
     f0.eval("globalThis.F1 = #{f1.id}")
@@ -1468,7 +1468,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_webassembly
-    context = MiniRacer::Context.new()
+    context = MiniRacerCsim::Context.new()
     context.eval("let instance = null;")
     filename = File.expand_path("../support/add.wasm", __FILE__)
     context.attach("loadwasm", proc { |f| File.read(filename).each_byte.to_a })
@@ -1501,14 +1501,14 @@ class MiniRacerTest < Minitest::Test
   Response = Struct.new(:code)
 
   def test_exception_objects
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("repro", lambda { raise ReproError.new(Response.new(404)) })
     assert_raises(ReproError) { context.eval("repro();") }
   end
 
   def test_timeout
-    context = MiniRacer::Context.new(timeout: 500, max_memory: 20_000_000)
-    assert_raises(MiniRacer::ScriptTerminatedError) { context.eval <<~JS }
+    context = MiniRacerCsim::Context.new(timeout: 500, max_memory: 20_000_000)
+    assert_raises(MiniRacerCsim::ScriptTerminatedError) { context.eval <<~JS }
         var doit = () => {
           while (true) {}
         }
@@ -1517,14 +1517,14 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_eval_returns_unfrozen_string
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     result = context.eval("'Hello George!'")
     assert_equal("Hello George!", result)
     assert_equal(false, result.frozen?)
   end
 
   def test_call_returns_unfrozen_string
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval('function hello(name) { return "Hello " + name + "!" }')
     result = context.call("hello", "George")
     assert_equal("Hello George!", result)
@@ -1532,7 +1532,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_callback_string_arguments_are_not_frozen
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("test", proc { |text| text.frozen? })
 
     frozen = context.eval("test('Hello George!')")
@@ -1540,7 +1540,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_threading_safety
-    Thread.new { MiniRacer::Context.new.eval("100") }.join
+    Thread.new { MiniRacerCsim::Context.new.eval("100") }.join
     GC.start
   end
 
@@ -1550,7 +1550,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_poison
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval <<~JS
       const f = () => { throw "poison" }
       const d = {get: f, set: f}
@@ -1561,7 +1561,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_map
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     expected = { "x" => 42, "y" => 43 }
     assert_equal expected, context.eval("new Map([['x', 42], ['y', 43]])")
     expected = ["x", 42, "y", 43]
@@ -1576,7 +1576,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_regexp_string_iterator
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     # TODO(bnoordhuis) maybe detect the iterator object and serialize
     # it as a string or array of strings; problem is there is no V8 API
     # to detect regexp string iterator objects
@@ -1585,7 +1585,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_function_property
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     expected = { "m" => { 1 => 2, 3 => 4 }, "s" => [5, 7, 11, 13], "x" => 42 }
     script = <<~JS
       ({
@@ -1607,13 +1607,13 @@ class MiniRacerTest < Minitest::Test
       skip "no timezone data" # happens on the musl buildbots
     end
     time = Time.current
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("f", proc { time })
     assert_in_delta time.to_f, context.call("f").to_f, 0.001
   end
 
   def test_string_encoding
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     assert_equal "ä", context.eval("'ä'")
     assert_equal "ok", context.eval("'ok'".encode("ISO-8859-1"))
     assert_equal "ok", context.eval("'ok'".encode("ISO8859-1"))
@@ -1625,7 +1625,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_object_ref
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.eval("function f(o) { return o }")
     expected = {}
     expected["a"] = expected["b"] = { "x" => 42 }
@@ -1634,7 +1634,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_termination_exception
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     a = Thread.new { context.stop while true }
     b = Thread.new { context.heap_stats while true } # should not crash/abort
     sleep 1.5
@@ -1643,17 +1643,17 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_ruby_exception
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("test", proc { raise "boom" })
     actual = context.eval("try { test() } catch (e) { e }")
-    assert_equal(actual.class, MiniRacer::ScriptError)
+    assert_equal(actual.class, MiniRacerCsim::ScriptError)
     assert_equal(actual.message, "boom")
     assert_equal(actual.backtrace, ["JavaScript Error: boom", "JavaScript at <eval>:1:7"])
   end
 
   def test_large_integer
     [10_000_000_001, -2**63, 2**63-1].each { |big_int|
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       context.attach("test", proc { big_int })
       result = context.eval("test()")
       assert_equal(result.class, big_int.class)
@@ -1661,7 +1661,7 @@ class MiniRacerTest < Minitest::Test
     }
     types = []
     [2**63/1024-1, 2**63/1024, -2**63/1024+1, -2**63/1024].each { |big_int|
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       context.attach("test", proc { big_int })
       context.attach("type", proc { |arg| types.push(arg) })
       result = context.eval("const t = test(); type(typeof t); t")
@@ -1672,15 +1672,15 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_uint8array_is_converted_to_string
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     result = context.eval('new Uint8Array([0, 1, 2, 3])')
     assert_equal "\x00\x01\x02\x03".b, result
   end
 
   def test_binary_returns_uint8array
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     context.attach("create_uint8_array", -> {
-      MiniRacer::Binary.new([1, 2, 3, 4].pack("C*"))
+      MiniRacerCsim::Binary.new([1, 2, 3, 4].pack("C*"))
     })
 
     result = context.eval <<~JS
@@ -1693,8 +1693,8 @@ class MiniRacerTest < Minitest::Test
   def test_exception_message_encoding
     e = nil
     begin
-      MiniRacer::Context.new.eval("throw Error('ä')")
-    rescue MiniRacer::RuntimeError => e_
+      MiniRacerCsim::Context.new.eval("throw Error('ä')")
+    rescue MiniRacerCsim::RuntimeError => e_
       e = e_
     end
     assert e
@@ -1703,39 +1703,39 @@ class MiniRacerTest < Minitest::Test
 
   def test_v8_cached_data_version_tag
     # Triggers v8_once_init which is when the constant is populated.
-    MiniRacer::Context.new
+    MiniRacerCsim::Context.new
 
-    assert_kind_of Integer, MiniRacer::V8_CACHED_DATA_VERSION_TAG
-    refute_equal 0, MiniRacer::V8_CACHED_DATA_VERSION_TAG
+    assert_kind_of Integer, MiniRacerCsim::V8_CACHED_DATA_VERSION_TAG
+    refute_equal 0, MiniRacerCsim::V8_CACHED_DATA_VERSION_TAG
     # Stable across calls.
-    assert_equal MiniRacer::V8_CACHED_DATA_VERSION_TAG, MiniRacer::V8_CACHED_DATA_VERSION_TAG
+    assert_equal MiniRacerCsim::V8_CACHED_DATA_VERSION_TAG, MiniRacerCsim::V8_CACHED_DATA_VERSION_TAG
   end
 
   def test_compile_run_roundtrip
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     script = ctx.compile("1 + 2 + 3")
-    assert_kind_of MiniRacer::Script, script
+    assert_kind_of MiniRacerCsim::Script, script
     assert_equal 6, script.run
     assert_equal 6, script.run # idempotent
   end
 
   def test_compile_filename_in_parse_error
-    err = assert_raises(MiniRacer::ParseError) do
-      MiniRacer::Context.new.compile("function foo(", filename: "bundle.js")
+    err = assert_raises(MiniRacerCsim::ParseError) do
+      MiniRacerCsim::Context.new.compile("function foo(", filename: "bundle.js")
     end
     assert_includes err.message, "bundle.js"
   end
 
   def test_compile_invalid_source
-    assert_raises(MiniRacer::ParseError) do
-      MiniRacer::Context.new.compile("foo bar baz garbage")
+    assert_raises(MiniRacerCsim::ParseError) do
+      MiniRacerCsim::Context.new.compile("foo bar baz garbage")
     end
   end
 
   def test_compile_runtime_error
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     script = ctx.compile("throw new Error('boom')")
-    err = assert_raises(MiniRacer::RuntimeError) do
+    err = assert_raises(MiniRacerCsim::RuntimeError) do
       script.run
     end
     assert_includes err.message, "boom"
@@ -1744,7 +1744,7 @@ class MiniRacerTest < Minitest::Test
   def test_compile_cached_data_save_restore
 
     src = "function sq(x) { return x * x } sq(7)"
-    ctx_a = MiniRacer::Context.new
+    ctx_a = MiniRacerCsim::Context.new
     s_a = ctx_a.compile(src, filename: "sq.js", produce_cache: true)
     blob = s_a.cached_data
     assert_kind_of String, blob
@@ -1754,7 +1754,7 @@ class MiniRacerTest < Minitest::Test
     assert_equal 49, s_a.run
     ctx_a.dispose
 
-    ctx_b = MiniRacer::Context.new
+    ctx_b = MiniRacerCsim::Context.new
     s_b = ctx_b.compile(src, filename: "sq.js", cached_data: blob)
     refute_predicate s_b, :cache_rejected?
     assert_nil s_b.cached_data, "accepted blob → nil so caller skips redundant persist"
@@ -1765,7 +1765,7 @@ class MiniRacerTest < Minitest::Test
 
     src = "function sq(x) { return x * x } sq(7)"
     corrupt = ("garbage" * 100).b
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     script = ctx.compile(src, cached_data: corrupt, produce_cache: true)
     assert_predicate script, :cache_rejected?
     fresh = script.cached_data
@@ -1776,7 +1776,7 @@ class MiniRacerTest < Minitest::Test
 
   def test_compile_default_skips_cache_production
 
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     script = ctx.compile("1 + 1", filename: "no_cache.js")
     assert_nil script.cached_data
     refute_predicate script, :cache_rejected?
@@ -1785,12 +1785,12 @@ class MiniRacerTest < Minitest::Test
 
   def test_compile_produce_cache_inside_host_fn_raises
 
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     caught = nil
     ctx.attach("trigger", lambda {
       begin
         ctx.compile("var v = 1; v", filename: "inside.js", produce_cache: true)
-      rescue MiniRacer::RuntimeError => e
+      rescue MiniRacerCsim::RuntimeError => e
         caught = e
       end
       nil
@@ -1807,7 +1807,7 @@ class MiniRacerTest < Minitest::Test
     # host fns. cached_data stays nil because we skip CreateCodeCache in
     # callback frames; the user can warm the cache via top-level compile
     # calls with produce_cache: true at startup instead.
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     ctx.attach("run_inline", lambda {|label, body|
       script = ctx.compile(body, filename: label)
       script.run
@@ -1820,35 +1820,35 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_cached_data_must_be_binary
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     assert_raises(EncodingError) do
       ctx.compile("1+1", cached_data: "not binary".encode("UTF-8"))
     end
   end
 
   def test_compile_cached_data_type_error
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     assert_raises(TypeError) do
       ctx.compile("1+1", cached_data: 42)
     end
   end
 
   def test_script_dispose_idempotent
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     script = ctx.compile("1 + 1")
     assert_equal 2, script.run
     refute_predicate script, :disposed?
     script.dispose
     assert_predicate script, :disposed?
     assert_nil script.dispose
-    assert_raises(MiniRacer::RuntimeError) { script.run }
+    assert_raises(MiniRacerCsim::RuntimeError) { script.run }
   end
 
   def test_script_after_context_dispose
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     script = ctx.compile("1 + 1", produce_cache: true)
     ctx.dispose
-    assert_raises(MiniRacer::ContextDisposedError) { script.run }
+    assert_raises(MiniRacerCsim::ContextDisposedError) { script.run }
     # cached_data is still readable — it was stashed at compile time
     refute_nil script.cached_data
     # dispose on script after context dispose is a no-op
@@ -1856,13 +1856,13 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_script_new_direct_raises
-    assert_raises(StandardError) { MiniRacer::Script.new }
+    assert_raises(StandardError) { MiniRacerCsim::Script.new }
   end
 
   def test_compile_then_eval_interleave
     # Compile mutates the context's globals just like eval, and survives
     # interleaved evals.
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     s1 = ctx.compile("var counter = 10; counter")
     assert_equal 10, s1.run
     ctx.eval("counter += 5")
@@ -1871,35 +1871,35 @@ class MiniRacerTest < Minitest::Test
     assert_equal 31, ctx.eval("counter + 16")
   end
 
-  # -- ES module API (Context#compile_module / MiniRacer::Module) --
+  # -- ES module API (Context#compile_module / MiniRacerCsim::Module) --
 
   def test_compile_module_returns_handle
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
-    assert_kind_of MiniRacer::Module, mod
+    assert_kind_of MiniRacerCsim::Module, mod
     refute_predicate mod, :disposed?
   end
 
   def test_compile_module_parse_error
-    ctx = MiniRacer::Context.new
-    assert_raises(MiniRacer::ParseError) do
+    ctx = MiniRacerCsim::Context.new
+    assert_raises(MiniRacerCsim::ParseError) do
       ctx.compile_module("this is not valid", filename: "bad.js")
     end
   end
 
   def test_compile_module_accepts_import_declaration
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("import { x } from 'other'; export const y = x + 1",
                              filename: "imp.js")
-    assert_kind_of MiniRacer::Module, mod
+    assert_kind_of MiniRacerCsim::Module, mod
   end
 
   def test_module_new_direct_raises
-    assert_raises(MiniRacer::RuntimeError) { MiniRacer::Module.new }
+    assert_raises(MiniRacerCsim::RuntimeError) { MiniRacerCsim::Module.new }
   end
 
   def test_module_dispose_idempotent
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     mod.dispose
     assert_predicate mod, :disposed?
@@ -1907,35 +1907,35 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_after_context_dispose
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     ctx.dispose
-    assert_raises(MiniRacer::ContextDisposedError) { mod.status }
+    assert_raises(MiniRacerCsim::ContextDisposedError) { mod.status }
     assert_nil mod.dispose
   end
 
   def test_module_status_starts_uninstantiated
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     assert_equal :uninstantiated, mod.status
   end
 
   def test_module_status_after_dispose_raises
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     mod.dispose
-    assert_raises(MiniRacer::RuntimeError) { mod.status }
+    assert_raises(MiniRacerCsim::RuntimeError) { mod.status }
   end
 
   def test_module_instantiate_no_imports_skips_resolver
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     mod.instantiate { raise "resolver should not be called" }
     assert_equal :instantiated, mod.status
   end
 
   def test_module_instantiate_calls_resolver_with_specifier
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     dep = ctx.compile_module("export const y = 7", filename: "dep.js")
     main = ctx.compile_module("import { y } from 'dep'; export const z = y * 2",
                               filename: "main.js")
@@ -1947,22 +1947,22 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_requires_block
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     assert_raises(ArgumentError) { mod.instantiate }
   end
 
   def test_module_instantiate_resolver_returning_non_module_raises
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("import 'foo'", filename: "m.js")
-    err = assert_raises(MiniRacer::RuntimeError) do
+    err = assert_raises(MiniRacerCsim::RuntimeError) do
       mod.instantiate {|_spec| "not a module" }
     end
-    assert_includes err.message, "MiniRacer::Module"
+    assert_includes err.message, "MiniRacerCsim::Module"
   end
 
   def test_module_instantiate_resolver_exception_bubbles_original_class
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("import 'foo'", filename: "m.js")
     err = assert_raises(ArgumentError) do
       mod.instantiate {|_spec| raise ArgumentError, "deliberate" }
@@ -1971,7 +1971,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_resolves_transitively
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     a = ctx.compile_module("export const a = 1", filename: "a.js")
     b = ctx.compile_module("import { a } from 'a'; export const b = a + 1", filename: "b.js")
     c = ctx.compile_module("import { b } from 'b'; export const c = b + 1", filename: "c.js")
@@ -1983,7 +1983,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_passes_referrer_url_to_resolver
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     dep = ctx.compile_module("export const y = 1", filename: "lib/dep.js")
     main = ctx.compile_module("import { y } from './dep'; export const z = y",
                               filename: "lib/main.js")
@@ -1996,7 +1996,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_import_meta_url_is_populated
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("globalThis.metaUrl = import.meta.url",
                              filename: 'src/entry.js')
     mod.instantiate { raise 'resolver should not be called' }
@@ -2005,7 +2005,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_filename_with_embedded_nul_survives_roundtrip
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     name = "a\0b.js"
     mod = ctx.compile_module('globalThis.url = import.meta.url', filename: name)
     mod.instantiate { raise 'resolver should not be called' }
@@ -2014,25 +2014,25 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_evaluate_before_instantiate_raises
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module('export const x = 1', filename: 'a.js')
-    err = assert_raises(MiniRacer::RuntimeError) { mod.evaluate }
+    err = assert_raises(MiniRacerCsim::RuntimeError) { mod.evaluate }
     assert_includes err.message, 'instantiated'
   end
 
   def test_module_resolver_rejects_module_from_other_context
-    ctx_a = MiniRacer::Context.new
-    ctx_b = MiniRacer::Context.new
+    ctx_a = MiniRacerCsim::Context.new
+    ctx_b = MiniRacerCsim::Context.new
     foreign = ctx_a.compile_module('export const x = 1', filename: 'a.js')
     main = ctx_b.compile_module("import 'foo'", filename: 'main.js')
-    err = assert_raises(MiniRacer::RuntimeError) do
+    err = assert_raises(MiniRacerCsim::RuntimeError) do
       main.instantiate {|_spec, _ref| foreign }
     end
     assert_includes err.message, 'different Context'
   end
 
   def test_dynamic_import_resolver_resolves_with_namespace
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     dep = ctx.compile_module('export const x = 42', filename: 'dep.js')
     dep.instantiate { raise 'resolver should not be called' }
     dep.evaluate
@@ -2049,7 +2049,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_without_resolver_rejects
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     ctx.eval(<<~JS, filename: 'main.js')
       import('foo').catch(e => { globalThis.err = String(e) })
     JS
@@ -2058,8 +2058,8 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_resolver_rejects_module_from_other_context
-    ctx_a = MiniRacer::Context.new
-    ctx_b = MiniRacer::Context.new
+    ctx_a = MiniRacerCsim::Context.new
+    ctx_b = MiniRacerCsim::Context.new
     foreign = ctx_a.compile_module('export const x = 1', filename: 'a.js')
     foreign.instantiate { raise 'noop' }
     foreign.evaluate
@@ -2072,7 +2072,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_resolver_auto_evaluates_pending_module
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     dep = ctx.compile_module('globalThis.evaled = (globalThis.evaled||0)+1; export const x = 7',
                              filename: 'dep.js')
     dep.instantiate { raise 'noop' }
@@ -2086,7 +2086,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_auto_evaluate_drains_module_body_microtasks
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     dep = ctx.compile_module(<<~JS, filename: 'dep.js')
       globalThis.t = 0;
       Promise.resolve().then(() => { globalThis.t = 1 });
@@ -2104,7 +2104,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_resolver_setter_type_check
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     assert_raises(TypeError) { ctx.dynamic_import_resolver = 42 }
     ctx.dynamic_import_resolver = nil
     assert_nil ctx.dynamic_import_resolver
@@ -2114,7 +2114,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_dispose_releases_handles_eagerly
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     before = ctx.heap_stats[:used_heap_size]
     1000.times do |i|
       m = ctx.compile_module("export const x = #{i}", filename: "m#{i}.js")
@@ -2127,7 +2127,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_resolver_can_compile_lazily
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     sources = {
       "tip"  => "import { mid } from 'mid'; export const tip = mid + 'tip'",
       "mid"  => "import { base } from 'base'; export const mid = base + 'mid'",
@@ -2143,34 +2143,34 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_evaluate_returns_undefined_for_simple_module
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 42", filename: "a.js")
     mod.instantiate { raise "resolver should not be called" }
     assert_nil mod.evaluate
   end
 
   def test_module_evaluate_runtime_error_propagates
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("throw new Error('boom')", filename: "bad.js")
     mod.instantiate { raise "resolver should not be called" }
-    err = assert_raises(MiniRacer::RuntimeError) { mod.evaluate }
+    err = assert_raises(MiniRacerCsim::RuntimeError) { mod.evaluate }
     assert_includes err.message, "boom"
   end
 
   def test_module_evaluate_top_level_await_unsupported
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     tla = ctx.compile_module(
       "await new Promise((resolve) => setTimeout(resolve, 1)); export const x = 1",
       filename: "tla.js")
     tla.instantiate { raise "resolver should not be called" }
     # setTimeout is undefined in this isolate so the await rejects; the
-    # surface contract is that the user gets a MiniRacer::RuntimeError
+    # surface contract is that the user gets a MiniRacerCsim::RuntimeError
     # rather than a hang/crash, regardless of which rejection V8 surfaces.
-    assert_raises(MiniRacer::RuntimeError) { tla.evaluate }
+    assert_raises(MiniRacerCsim::RuntimeError) { tla.evaluate }
   end
 
   def test_module_namespace_data_exports
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module(
       "export const a = 1; export const b = 'two'; export const c = [3, 4]",
       filename: "a.js")
@@ -2180,7 +2180,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_namespace_includes_default_export
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module(
       "const v = { kind: 'obj', n: 7 }; export default v",
       filename: "d.js")
@@ -2190,13 +2190,13 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_namespace_before_instantiate_raises
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
-    assert_raises(MiniRacer::RuntimeError) { mod.namespace }
+    assert_raises(MiniRacerCsim::RuntimeError) { mod.namespace }
   end
 
   def test_module_status_transitions
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const v = 5", filename: "a.js")
     assert_equal :uninstantiated, mod.status
     mod.instantiate { raise "resolver should not be called" }
@@ -2206,7 +2206,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_imports_provide_runtime_bindings
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     dep = ctx.compile_module("export const base = 10", filename: "dep.js")
     main = ctx.compile_module(
       "import { base } from 'dep'; export const doubled = base * 2",
@@ -2218,7 +2218,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_evaluate_idempotent
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     mod.instantiate { raise "resolver should not be called" }
     mod.evaluate
@@ -2228,7 +2228,7 @@ class MiniRacerTest < Minitest::Test
   def test_module_accumulation_freed_by_context_dispose
     # Many short-lived modules accumulate handles until ctx.dispose, which
     # walks st.modules under the still-live isolate before tearing it down.
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     100.times {|i| ctx.compile_module("export const v#{i} = #{i}", filename: "m#{i}.js") }
     ctx.dispose
   end
@@ -2249,7 +2249,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_evaluates_whole_graph
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     sources = {
       "/app.js" => 'import {a} from "./a.js"; import {b} from "./b.js"; globalThis.RESULT = a + b;',
       "/a.js"   => 'import {c} from "./c.js"; export const a = c + 1;',
@@ -2265,7 +2265,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_batches_callbacks_per_level
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     sources = {
       "/app.js" => 'import {a} from "./a.js"; import {b} from "./b.js";',
       "/a.js"   => 'import {c} from "./c.js"; export const a = 1;',
@@ -2285,17 +2285,17 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_populates_import_meta_url
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     resolve, fetch = graph_loader({ "/m.js" => "globalThis.META = import.meta.url; export const x = 1;" })
     ctx.load_module_graph("/m.js", resolve: resolve, fetch_batch: fetch)
     assert_equal("/m.js", ctx.eval("globalThis.META"))
   end
 
   def test_load_module_graph_missing_dependency_fails_gracefully
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     # fetch returns nil for the (resolved) missing dependency.
     resolve, fetch = graph_loader({ "/e.js" => 'import {z} from "./missing.js"; export const y = z;' })
-    assert_raises(MiniRacer::RuntimeError) do
+    assert_raises(MiniRacerCsim::RuntimeError) do
       ctx.load_module_graph("/e.js", resolve: resolve, fetch_batch: fetch)
     end
     # The context must remain usable after a failed graph load.
@@ -2304,10 +2304,10 @@ class MiniRacerTest < Minitest::Test
 
   def test_load_module_graph_consumes_cached_data
     body = "export const v = 42;"
-    cache = MiniRacer::Context.new.compile_module(body, filename: "/v.js", produce_cache: true).cached_data
+    cache = MiniRacerCsim::Context.new.compile_module(body, filename: "/v.js", produce_cache: true).cached_data
     refute_nil(cache)
 
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     result = ctx.load_module_graph("/v.js",
       resolve: ->(edges) { edges.map { nil } },
       fetch_batch: ->(urls) { urls.map {|u| u == "/v.js" ? [body, cache] : nil } })
@@ -2319,9 +2319,9 @@ class MiniRacerTest < Minitest::Test
   def test_load_module_graph_reports_rejected_cache
     # A code cache produced for one source is rejected when consumed against a
     # different source (the cross-process-cache version/content mismatch case).
-    stale = MiniRacer::Context.new.compile_module("export const v = 1;",
+    stale = MiniRacerCsim::Context.new.compile_module("export const v = 1;",
                                                   filename: "/v.js", produce_cache: true).cached_data
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     result = ctx.load_module_graph("/v.js",
       resolve: ->(edges) { edges.map { nil } },
       fetch_batch: ->(urls) { urls.map { ["export const somethingElse = 2;", stale] } })
@@ -2329,7 +2329,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_propagates_callback_exception
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     boom = Class.new(StandardError)
     assert_raises(boom) do
       ctx.load_module_graph("/x.js",
@@ -2340,13 +2340,13 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_requires_callables
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     assert_raises(ArgumentError) { ctx.load_module_graph("/x.js", resolve: nil, fetch_batch: ->(u) { [] }) }
     assert_raises(ArgumentError) { ctx.load_module_graph("/x.js", resolve: ->(e) { [] }, fetch_batch: nil) }
   end
 
   def test_load_module_graph_handles_cyclic_imports
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     # a.js <-> b.js form a legal ES module cycle.
     sources = {
       "/a.js" => 'import {fromB} from "./b.js"; export const fromA = "A"; globalThis.SEEN = (globalThis.SEEN || "") + "a";',
@@ -2360,7 +2360,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_fetches_shared_dependency_once
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     # Diamond: app -> {left, right} -> shared. shared must be fetched once.
     sources = {
       "/app.js"    => 'import "./left.js"; import "./right.js";',
@@ -2378,7 +2378,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_dynamic_import_reuses_loaded_module
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     # The entry statically imports shared and mutates it; a later dynamic
     # import() of the same URL must see the SAME Module instance (n == 42), not
     # a freshly recompiled one (n == 0). This is the identity contract.
@@ -2401,7 +2401,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_dynamic_import_loads_new_subgraph
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     # lazy.js is not in the static graph; the runtime dynamic import must walk
     # and load it on demand via the persisted fetch/resolve callbacks.
     sources = {
@@ -2417,7 +2417,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_relists_only_newly_compiled_modules
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     sources = {
       "/a.js"      => 'import "./shared.js"; export const a = 1;',
       "/b.js"      => 'import "./shared.js"; export const b = 2;',
@@ -2435,7 +2435,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_rolls_back_a_failed_load
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     full = {
       "/entry.js" => 'import {x} from "./dep.js"; globalThis.X = x;',
       "/dep.js"   => "export const x = 7;",
@@ -2445,7 +2445,7 @@ class MiniRacerTest < Minitest::Test
     fetch   = ->(urls)  { urls.map  {|u| (s = available[u]) ? [s, nil] : nil } }
 
     # First load fails: /dep.js 404s, so /entry.js can't be instantiated.
-    assert_raises(MiniRacer::RuntimeError) do
+    assert_raises(MiniRacerCsim::RuntimeError) do
       ctx.load_module_graph("/entry.js", resolve: resolve, fetch_batch: fetch)
     end
     # The failed load must not leave a half-loaded /entry.js in the registry: with
@@ -2456,14 +2456,14 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_refuses_reset_realm_from_callback
-    ctx = MiniRacer::Context.new
+    ctx = MiniRacerCsim::Context.new
     # reset_realm during a fetch/resolve callback would tear the realm out from
     # under the in-flight graph load; in_callback must make it refuse.
     fetch = lambda do |urls|
       ctx.reset_realm
       urls.map { nil }
     end
-    error = assert_raises(MiniRacer::RuntimeError) do
+    error = assert_raises(MiniRacerCsim::RuntimeError) do
       ctx.load_module_graph("/x.js", resolve: ->(e) { [] }, fetch_batch: fetch)
     end
     assert_match(/within a host function callback/, error.message)

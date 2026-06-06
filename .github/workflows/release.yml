@@ -11,9 +11,9 @@ name: Release
 # RubyGems supports a "pending" trusted publisher, so the very first release
 # (before the gem exists on rubygems.org) can also use OIDC.
 #
-# To cut a release: bump MiniRacer::VERSION, then tag it, e.g.
+# To cut a release: bump MiniRacerCsim::VERSION, then tag it, e.g.
 #   git tag v0.21.1.0 && git push origin v0.21.1.0
-# (the tag must equal "v#{MiniRacer::VERSION}" — enforced below).
+# (the tag must equal "v#{MiniRacerCsim::VERSION}" — enforced below).
 
 on:
   push:
@@ -36,9 +36,9 @@ jobs:
           ruby-version: "3.3"
           bundler-cache: true
 
-      - name: Verify the tag matches MiniRacer::VERSION
+      - name: Verify the tag matches MiniRacerCsim::VERSION
         run: |
-          want="v$(ruby -Ilib -rmini_racer/version -e 'print MiniRacer::VERSION')"
+          want="v$(ruby -Ilib -rmini_racer_csim/version -e 'print MiniRacerCsim::VERSION')"
           if [ "$GITHUB_REF_NAME" != "$want" ]; then
             echo "::error::tag '$GITHUB_REF_NAME' does not match gem version '$want'"
             exit 1

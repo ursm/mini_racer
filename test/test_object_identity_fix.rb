@@ -4,7 +4,7 @@ class ObjectIdentityTest < Minitest::Test
   def test_separate_identical_objects_remain_separate
     # This test ensures that separate Ruby objects with identical content
     # become separate JavaScript objects, not shared references
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     
     # Create three separate Ruby objects with identical content
     obj1 = { "value" => 42 }
@@ -55,7 +55,7 @@ class ObjectIdentityTest < Minitest::Test
   def test_same_ruby_object_multiple_times_shares_identity
     # This test ensures that the SAME Ruby object referenced multiple times
     # correctly shares JavaScript identity (for circular reference handling)
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     
     # Create one Ruby object and reference it multiple times
     shared_obj = { "value" => 42 }
@@ -102,7 +102,7 @@ class ObjectIdentityTest < Minitest::Test
   
   def test_nested_objects_with_identical_content
     # Test nested structures to ensure the fix works recursively
-    context = MiniRacer::Context.new
+    context = MiniRacerCsim::Context.new
     
     # Create nested objects with identical content but separate instances
     obj1 = { "outer" => { "inner" => { "value" => 42 } } }

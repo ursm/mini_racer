@@ -26,5 +26,5 @@ Traceback (most recent call last):
          3: from JavaScript at <anonymous>:1:17
          2: from JavaScript at Module.ErrorCausingComponent (/webpack:/webpackLib/index.jsx:19:3)
          1: from JavaScript at throwSomeError (/webpack:/webpackLib/error-causing-component.jsx:8:3)
-JavaScript at /webpack:/webpackLib/error-causing-component.jsx:2:9: Error: ^^ Look! These stack traces map to the actual source code :) (MiniRacer::RuntimeError)
+JavaScript at /webpack:/webpackLib/error-causing-component.jsx:2:9: Error: ^^ Look! These stack traces map to the actual source code :) (MiniRacerCsim::RuntimeError)
 ```

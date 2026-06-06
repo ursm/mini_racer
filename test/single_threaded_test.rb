@@ -12,9 +12,9 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     file = Tempfile.new(["mini_racer_single_threaded", ".rb"])
     file.write(<<~RUBY)
       $LOAD_PATH.unshift #{File.expand_path("../lib", __dir__).inspect}
-      require "mini_racer"
+      require 'mini_racer_csim'
 
-      MiniRacer::Platform.set_flags!(:single_threaded)
+      MiniRacerCsim::Platform.set_flags!(:single_threaded)
 
       #{script}
     RUBY
@@ -49,7 +49,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
 
   def test_basic_eval_and_call
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       raise "bad eval" unless context.eval("1 + 1") == 2
       context.eval("function add(a, b) { return a + b }")
       raise "bad call" unless context.call("add", 20, 22) == 42
@@ -58,7 +58,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
 
   def test_ruby_callback_from_javascript
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       context.attach("ruby_add", proc { |a, b| a + b })
       raise "bad callback result" unless context.eval("ruby_add(20, 22)") == 42
     RUBY
@@ -66,7 +66,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
 
   def test_nested_javascript_ruby_javascript_call
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       context.eval("function js_add(a, b) { return a + b }")
       context.attach("ruby_calls_js", proc { context.call("js_add", 20, 22) })
       raise "bad nested callback result" unless context.eval("ruby_calls_js()") == 42
@@ -75,7 +75,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
 
   def test_recursive_javascript_ruby_callback_ping_pong
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       context.attach("ruby_recurse", proc { |n|
         n <= 0 ? "done" : context.call("js_recurse", n - 1)
       })
@@ -91,7 +91,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
 
   def test_ruby_callback_exception_propagates
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       context.attach("boom", proc { raise "ruby boom" })
 
       begin
@@ -105,14 +105,14 @@ class MiniRacerSingleThreadedTest < Minitest::Test
 
   def test_dispose_after_runner_started
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       raise "bad eval" unless context.eval("1 + 1") == 2
       context.dispose
 
       begin
         context.eval("1 + 1")
         raise "expected disposed error"
-      rescue MiniRacer::ContextDisposedError
+      rescue MiniRacerCsim::ContextDisposedError
       end
 
       context = nil
@@ -122,8 +122,8 @@ class MiniRacerSingleThreadedTest < Minitest::Test
 
   def test_multiple_contexts_and_dispose_one
     assert_single_threaded_script <<~'RUBY'
-      a = MiniRacer::Context.new
-      b = MiniRacer::Context.new
+      a = MiniRacerCsim::Context.new
+      b = MiniRacerCsim::Context.new
 
       a.eval("var x = 1")
       b.eval("var x = 2")
@@ -140,7 +140,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     assert_single_threaded_script <<~'RUBY'
       exit 0 unless Process.respond_to?(:fork)
 
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       context.eval("var answer = 41")
       context.eval("answer += 1") # starts the reusable runner and leaves it idle
 
@@ -158,7 +158,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     # thread, so a regression that mishandles the Locker/scope would deadlock
     # (caught by the bounded wait) rather than just fail.
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       context.attach("host.add", proc { |a, b| a + b })
       context.eval("globalThis.leaked = 1")
       raise "bad host" unless context.eval("host.add(2, 3)") == 5
@@ -176,7 +176,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     # single-threaded mode; a regression that mishandled the rendezvous would
     # deadlock (caught by the bounded wait) rather than just fail.
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       sources = {
         "/app.js" => 'import {a} from "./a.js"; globalThis.OUT = a + 5;',
         "/a.js"   => "export const a = 37;",
@@ -194,7 +194,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     # Dynamic import after a graph load does nested resolve/fetch round-trips on
     # the shared Ruby thread; a rendezvous regression would deadlock here.
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new
+      context = MiniRacerCsim::Context.new
       sources = {
         "/entry.js" => 'import {s} from "./shared.js"; s.n = 42; globalThis.OUT = "pending"; import("./shared.js").then(m => { globalThis.OUT = m.s.n; });',
         "/shared.js" => "export const s = { n: 0 };",
@@ -210,7 +210,7 @@ class MiniRacerSingleThreadedTest < Minitest::Test
     # The native checkpoint runs inline on the isolate thread and must not take
     # a v8::Locker, which would deadlock when V8 shares the Ruby thread.
     assert_single_threaded_script <<~'RUBY'
-      context = MiniRacer::Context.new(host_namespace: "MiniRacer")
+      context = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
       order = context.eval(<<~JS)
         const seen = [];
         Promise.resolve().then(() => seen.push("microtask-fired"));

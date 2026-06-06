@@ -1,9 +1,9 @@
 require 'mkmf'
 
-$srcs = ["mini_racer_extension.c", "mini_racer_v8.cc"]
+$srcs = ["mini_racer_csim_extension.c", "mini_racer_v8.cc"]
 
-require_relative '../../lib/mini_racer/version'
-gem 'libv8-node', MiniRacer::LIBV8_NODE_VERSION
+require_relative '../../lib/mini_racer_csim/version'
+gem 'libv8-node', MiniRacerCsim::LIBV8_NODE_VERSION
 require 'libv8-node'
 
 IS_DARWIN = RUBY_PLATFORM =~ /darwin/
@@ -67,4 +67,4 @@ if RUBY_ENGINE == 'ruby'
   $CPPFLAGS += ' -DENGINE_IS_CRUBY '
 end
 
-create_makefile 'mini_racer_extension'
+create_makefile 'mini_racer_csim_extension'

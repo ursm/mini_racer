@@ -1,9 +1,9 @@
 $LOAD_PATH.unshift File.expand_path('../../lib', __FILE__)
-require 'mini_racer'
+require 'mini_racer_csim'
 require 'objspace'
 
 def has_contexts
-  ObjectSpace.each_object(MiniRacer::Context).count > 0
+  ObjectSpace.each_object(MiniRacerCsim::Context).count > 0
 end
 
 def clear
@@ -13,7 +13,7 @@ def clear
 end
 
 def test
-  context = MiniRacer::Context.new
+  context = MiniRacerCsim::Context.new
   context.attach("add", proc{|a,b| a+b})
   context.eval('1+1')
   context.eval('"1"')

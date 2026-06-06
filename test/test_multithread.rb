@@ -6,8 +6,8 @@ require 'securerandom'
     context = nil
 
     Thread.new do
-      require "mini_racer"
-      context = MiniRacer::Context.new
+      require 'mini_racer_csim'
+      context = MiniRacerCsim::Context.new
     end.join
 
     Thread.new do
@@ -55,8 +55,8 @@ JS
 
 Thread
   .new do
-    require "mini_racer"
-    ctx = MiniRacer::Context.new
+    require 'mini_racer_csim'
+    ctx = MiniRacerCsim::Context.new
     ctx.eval("var a = 1+1")
     ctx.eval(big_eval)
   end

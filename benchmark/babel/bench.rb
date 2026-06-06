@@ -3,10 +3,10 @@ unless defined? Bundler
   exec 'bundle exec ruby bench.rb'
 end
 
-require 'mini_racer'
+require 'mini_racer_csim'
 
 
-ctx2 = MiniRacer::Context.new
+ctx2 = MiniRacerCsim::Context.new
 
 start = Time.now
 ctx2.eval(File.read('./helper_files/babel.js'))

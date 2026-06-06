@@ -8,7 +8,7 @@
 // a) hide symbols from other extensions (RTLD_LOCAL)
 // b) bind symbols tightly (RTLD_DEEPBIND, when available)
 
-void Init_mini_racer_loader(void);
+void Init_mini_racer_csim_loader(void);
 
 static void *_dln_load(const char *file);
 
@@ -115,9 +115,9 @@ failed:
     rb_raise(rb_eLoadError, "%s", error);
 }
 
-__attribute__((visibility("default"))) void Init_mini_racer_loader(void)
+__attribute__((visibility("default"))) void Init_mini_racer_csim_loader(void)
 {
-    VALUE mMiniRacer = rb_define_module("MiniRacer");
+    VALUE mMiniRacer = rb_define_module("MiniRacerCsim");
     VALUE mLoader = rb_define_module_under(mMiniRacer, "Loader");
     rb_define_singleton_method(mLoader, "load", _load_shared_lib, 1);
 }
