@@ -1,4 +1,11 @@
-- (Unreleased)
+- 0.21.1.1 - 07-06-2026
+  - Drop the TruffleRuby backend: mini_racer-csim is now a hard fork targeting CRuby/V8 only (the GraalJS/TruffleRuby shims and their tests are removed)
+  - Add per-frame realms via `Context#create_realm`, returning a `MiniRacer::Realm` (multiple V8 realms in one isolate, browser-iframe semantics) with `Realm#eval` / `call` / `attach` / `dispose` / `disposed?`
+    - all realms share one security token so they can reach each other's globals (same-origin iframe model)
+    - `__mr_realmGlobal(id)` returns a realm's live `globalThis` cross-realm; `__mr_realmOf(fn)` reports the realm a callback was created in ([[Realm]]) for WebIDL-style error attribution
+    - unhandled promise rejections are tracked and delivered per realm via `globalThis.__mr_emitUnhandledRejection(reason, promise)`; the queue is purged when a realm is disposed or reset so a stale rejection never fires against a fresh realm
+
+- 0.21.1.0 - 06-06-2026
   - Add `Context#perform_microtask_checkpoint` to synchronously drain the V8 microtask queue, useful for spec-compliant `dispatchEvent` sequencing inside Ruby callbacks
   - Expose V8 ScriptCompiler::CachedData via Context#compile / MiniRacer::Script (#411)
     - script = ctx.compile(src, filename:, cached_data:, produce_cache:) → Script handle
