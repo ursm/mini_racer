@@ -2075,12 +2075,16 @@ static VALUE realm_dispose(VALUE self)
     if (r->disposed)
         return Qnil;
     TypedData_Get_Struct(r->context, Context, &context_type, c);
+    // Mark disposed before the rendezvous: once we have committed to expunging
+    // the realm, disposed? must report true even if the rendezvous below raises
+    // (e.g. the context is concurrently disposed). The realm is unusable either
+    // way, and leaving the flag clear would re-send the request on a retry.
+    r->disposed = 1;
     if (!atomic_load(&c->quit)) {
         ser_init1(&s, 'X');    // e(X)punge realm, payload [id]
         ser_int(&s, r->id);
         rendezvous(c, &s.b);   // reply is an empty string; ignore
     }
-    r->disposed = 1;
     return Qnil;
 }
 

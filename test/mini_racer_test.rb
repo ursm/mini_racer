@@ -1212,6 +1212,28 @@ class MiniRacerTest < Minitest::Test
     end
   end
 
+  def test_reset_realm_drops_pending_unhandled_rejections
+    context = reset_realm_context
+
+    fired = []
+    context.attach("record", proc { |reason| fired << reason })
+
+    # Reject a promise with no handler but do NOT drain: the plain eval path
+    # queues it for the next checkpoint without delivering it (only
+    # drainMicrotasks / perform_microtask_checkpoint / pump_message_loop notify).
+    context.eval("Promise.reject(new Error('stale'));")
+
+    # reset_realm rebuilds the main realm (reusing id 0). The queued rejection
+    # belongs to the OLD realm 0; it must be dropped, not fired against the
+    # fresh realm 0 (whose globalThis is a different object).
+    context.reset_realm
+
+    context.eval("globalThis.__mr_emitUnhandledRejection = (reason) => record(String(reason));")
+    context.perform_microtask_checkpoint
+
+    assert_empty(fired, "a pre-reset rejection must not fire in the fresh realm")
+  end
+
   def test_reset_realm_collects_the_old_realm
     context = reset_realm_context
 

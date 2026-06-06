@@ -2866,6 +2866,15 @@ extern "C" void v8_dispose_realm(State *pst, const uint8_t *p, size_t n)
                 r.persistent_safe_context.Reset();
                 r.persistent_context.Reset();
                 st.realms.erase(it);
+                // Drop not-yet-delivered rejections tagged with this realm so
+                // notify_unhandled_rejections never fires them against a gone
+                // realm (or, if the id is later reused, the wrong one).
+                for (auto pit = st.pending_rejections.begin(); pit != st.pending_rejections.end();) {
+                    if (pit->second == id)
+                        pit = st.pending_rejections.erase(pit);
+                    else
+                        ++pit;
+                }
                 st.isolate->ContextDisposedNotification(false);
             }
         }
@@ -2990,6 +2999,15 @@ extern "C" void v8_reset_realm(State *pst)
     cur(st).scripts.clear();
     cur(st).modules.clear();
     cur(st).module_id_by_url.clear();
+    // Same rationale as the scripts/modules above: a not-yet-delivered rejection
+    // recorded against the old realm would, after the swap, fire against the
+    // fresh realm's globalThis (reset reuses the realm id). Drop them.
+    for (auto pit = st.pending_rejections.begin(); pit != st.pending_rejections.end();) {
+        if (pit->second == st.active_realm_id)
+            pit = st.pending_rejections.erase(pit);
+        else
+            ++pit;
+    }
     // The fresh realm has no registered modules; fall back to the legacy dynamic
     // import resolver until load_module_graph runs again and re-latches this.
     cur(st).uses_graph_loader = false;
