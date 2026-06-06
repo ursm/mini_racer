@@ -12,7 +12,7 @@ MiniRacer has an adapter for [execjs](https://github.com/rails/execjs) so it can
 
 ## This repository is `mini_racer-csim` (a fork)
 
-This is **`mini_racer-csim`**, a private fork of [`mini_racer`](https://github.com/rubyjs/mini_racer) maintained for [capybara-simulated](https://github.com/ursm/capybara-simulated). It adds browser-fidelity extensions (ES modules, realm reset, …) that capybara-simulated needs but most users do not — **if you are not using capybara-simulated, use upstream `mini_racer`.**
+This is **`mini_racer-csim`**, a private fork of [`mini_racer`](https://github.com/rubyjs/mini_racer) maintained for [capybara-simulated](https://github.com/ursm/capybara-simulated). It adds browser-fidelity extensions (ES modules, per-frame realms, realm reset, …) that capybara-simulated needs but most users do not — **if you are not using capybara-simulated, use upstream `mini_racer`.**
 
 It has its **own require path and namespace** so it never collides with — and loads deterministically alongside — upstream `mini_racer` in the same bundle: load it with `require 'mini_racer_csim'` and use the `MiniRacerCsim` module (e.g. `MiniRacerCsim::Context`). The native extensions are `mini_racer_csim_extension` / `mini_racer_csim_loader`. (The JS-side host-namespace brand, `globalThis.MiniRacer` by default, is embedder-chosen and unrelated to the Ruby namespace.)
 
@@ -24,10 +24,11 @@ It has its **own require path and namespace** so it never collides with — and 
 | ES Module API | `Context#compile_module` → `MiniRacerCsim::Module` (`#instantiate` / `#evaluate` / `#namespace` / `#status` / `#cached_data` / `#dispose`); `Context#dynamic_import_resolver=` | V8's ES module pipeline, `import.meta.url`, dynamic `import()` |
 | Batched module-graph loader | `Context#load_module_graph(resolve:, …)` | Loads an ESM graph in one batched, native (C++) pass; one `Module` per URL shared across every load path |
 | Realm reset | `Context#reset_realm` | Discards the user realm (`globalThis`) while keeping the warm isolate (browser per-navigation model); re-binds attached host functions and the host namespace |
+| Per-frame realms | `Context#create_realm` → `MiniRacerCsim::Realm` (`#eval` / `#call` / `#attach` / `#dispose` / `#disposed?`) | Multiple V8 realms (Contexts) in one isolate with browser-iframe semantics: realms share one security token for cross-realm access, `__mr_realmGlobal(id)` exposes a realm's live `globalThis` and `__mr_realmOf(fn)` reports a callback's `[[Realm]]`, and unhandled promise rejections are delivered per realm via `globalThis.__mr_emitUnhandledRejection` |
 | Host namespace | `Context.new(host_namespace: "MiniRacer")` → `globalThis.MiniRacer.drainMicrotasks()` | Opt-in JS namespace exposing an inline, rendezvous-free microtask checkpoint |
 | GVL release on boot | (automatic) | Releases the Ruby GVL while the V8 thread boots the isolate |
 
-The fork is periodically rebased on upstream `mini_racer` to pick up V8 / `libv8-node` bumps and bug fixes.
+This is a hard fork: it no longer tracks upstream `mini_racer`, and follows only `libv8-node` for V8 version bumps.
 
 ## Supported Ruby Versions & Troubleshooting
 
