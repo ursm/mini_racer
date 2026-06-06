@@ -204,6 +204,15 @@ typedef struct Script {
     int     disposed;
 } Script;
 
+// A per-frame realm (extra v8::Context in the same isolate); see
+// Context#create_realm. Like Script/Module, the C++ realm is freed eagerly via
+// Realm#dispose or at Context teardown — realm_free can't send a dispose RPC.
+typedef struct Realm {
+    VALUE   context;      // parent Context VALUE (kept alive via mark)
+    int32_t id;           // realm id (0 = main, never wrapped as a Realm)
+    int     disposed;
+} Realm;
+
 static void context_destroy(Context *c);
 static void context_free(void *arg);
 static void context_mark(void *arg);
@@ -257,6 +266,19 @@ static const rb_data_type_t module_type = {
     },
 };
 
+static void realm_free(void *arg);
+static void realm_mark(void *arg);
+static size_t realm_size(const void *arg);
+
+static const rb_data_type_t realm_type = {
+    .wrap_struct_name   =  "mini_racer/realm",
+    .function           = {
+        .dfree = realm_free,
+        .dmark = realm_mark,
+        .dsize = realm_size,
+    },
+};
+
 static VALUE platform_init_error;
 static VALUE context_disposed_error;
 static VALUE parse_error;
@@ -270,6 +292,7 @@ static VALUE context_class;
 static VALUE snapshot_class;
 static VALUE script_class;
 static VALUE module_class;
+static VALUE realm_class;
 static VALUE date_time_class;
 static VALUE binary_class;
 static VALUE js_function_class;
@@ -905,6 +928,7 @@ static void dispatch1(Context *c, const uint8_t *p, size_t n)
     case 'V': return v8_timedwait(c, p+1, n-1, v8_evaluate_module); // e(V)aluate
     case 'W': return v8_warmup(c->pst, p+1, n-1);
     case 'X': return v8_dispose_realm(c->pst, p+1, n-1);    // e(X)punge realm
+    case '@': return v8_timedwait(c, p+1, n-1, v8_realm_dispatch); // realm-scoped op
     case 'Z': return v8_dispose_module(c->pst, p+1, n-1);   // (Z) dispose module handle
     case 'L':
         b = 0;
@@ -1898,6 +1922,193 @@ static VALUE context_reset_realm(VALUE self)
     return Qnil;
 }
 
+// -- MiniRacer::Realm (per-frame realm = extra v8::Context in this isolate) --
+
+static void realm_free(void *arg)
+{
+    // Like module_free: no dispose RPC from a finalizer. State::~State()
+    // tears every realm down at Context teardown; use Realm#dispose to free
+    // a realm eagerly mid-lifetime.
+    ruby_xfree(arg);
+}
+
+static void realm_mark(void *arg)
+{
+    Realm *r = arg;
+    rb_gc_mark(r->context);
+}
+
+static size_t realm_size(const void *arg)
+{
+    (void)arg;
+    return sizeof(Realm);
+}
+
+static VALUE realm_alloc(VALUE klass)
+{
+    Realm *r;
+    return TypedData_Make_Struct(klass, Realm, &realm_type, r);
+}
+
+static VALUE realm_initialize(int argc, VALUE *argv, VALUE self)
+{
+    (void)argc; (void)argv; (void)self;
+    rb_raise(runtime_error, "MiniRacer::Realm must be created via Context#create_realm");
+}
+
+// Resolve the parent Context, raising if the realm or its context is disposed.
+static Context *realm_live_context(VALUE self, Realm **out)
+{
+    Realm *r;
+    Context *c;
+
+    TypedData_Get_Struct(self, Realm, &realm_type, r);
+    if (r->disposed)
+        rb_raise(runtime_error, "disposed realm");
+    TypedData_Get_Struct(r->context, Context, &context_type, c);
+    if (atomic_load(&c->quit))
+        rb_raise(context_disposed_error, "disposed context");
+    *out = r;
+    return c;
+}
+
+// Wrap an inner request (built with ser_init1(op)...) as a realm-scoped request
+// '@' + id(4 raw bytes) + inner, and dispatch it. Frees |inner|; the reply has
+// the same shape as the inner op's reply.
+static VALUE realm_rendezvous(Context *c, int32_t id, Ser *inner)
+{
+    Buf req;
+    buf_init(&req);
+    buf_putc(&req, '@');
+    buf_put(&req, &id, sizeof(id));        // same process => host endianness ok
+    buf_put(&req, inner->b.buf, inner->b.len);
+    ser_reset(inner);                      // release the inner buffer
+    return rendezvous(c, &req);            // takes ownership of |req|
+}
+
+static VALUE realm_id(VALUE self)
+{
+    Realm *r;
+    TypedData_Get_Struct(self, Realm, &realm_type, r);
+    return INT2NUM(r->id);
+}
+
+static VALUE realm_disposed_p(VALUE self)
+{
+    Realm *r;
+    TypedData_Get_Struct(self, Realm, &realm_type, r);
+    return r->disposed ? Qtrue : Qfalse;
+}
+
+static VALUE realm_eval(int argc, VALUE *argv, VALUE self)
+{
+    VALUE a, e, source, filename, kwargs;
+    Realm *r;
+    Context *c = realm_live_context(self, &r);
+    Ser s;
+
+    filename = Qnil;
+    rb_scan_args(argc, argv, "1:", &source, &kwargs);
+    Check_Type(source, T_STRING);
+    if (!NIL_P(kwargs))
+        filename = rb_hash_aref(kwargs, rb_id2sym(rb_intern("filename")));
+    if (NIL_P(filename))
+        filename = rb_str_new_cstr("<eval>");
+    Check_Type(filename, T_STRING);
+    ser_init1(&s, 'E');
+    ser_array_begin(&s, 2);
+    add_string(&s, filename);
+    add_string(&s, source);
+    ser_array_end(&s, 2);
+    a = realm_rendezvous(c, r->id, &s);
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    return rb_ary_pop(a);
+}
+
+static VALUE realm_call(int argc, VALUE *argv, VALUE self)
+{
+    VALUE name, args, a, e;
+    Realm *r;
+    Context *c = realm_live_context(self, &r);
+    Ser s;
+
+    rb_scan_args(argc, argv, "1*", &name, &args);
+    Check_Type(name, T_STRING);
+    rb_ary_unshift(args, name);
+    ser_init1(&s, 'C');
+    if (serialize(&s, args)) {
+        ser_reset(&s);
+        rb_raise(runtime_error, "Realm#call: %s", s.err);
+    }
+    a = realm_rendezvous(c, r->id, &s);
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    return rb_ary_pop(a);
+}
+
+static VALUE realm_attach(VALUE self, VALUE name, VALUE proc)
+{
+    VALUE e;
+    Realm *r;
+    Context *c = realm_live_context(self, &r);
+    Ser s;
+
+    ser_init1(&s, 'A');
+    ser_array_begin(&s, 2);
+    add_string(&s, name);
+    ser_int(&s, RARRAY_LENINT(c->procs));
+    ser_array_end(&s, 2);
+    rb_ary_push(c->procs, proc);
+    e = realm_rendezvous(c, r->id, &s);
+    handle_exception(e);
+    return Qnil;
+}
+
+static VALUE realm_dispose(VALUE self)
+{
+    Realm *r;
+    Context *c;
+    Ser s;
+
+    TypedData_Get_Struct(self, Realm, &realm_type, r);
+    if (r->disposed)
+        return Qnil;
+    TypedData_Get_Struct(r->context, Context, &context_type, c);
+    if (!atomic_load(&c->quit)) {
+        ser_init1(&s, 'X');    // e(X)punge realm, payload [id]
+        ser_int(&s, r->id);
+        rendezvous(c, &s.b);   // reply is an empty string; ignore
+    }
+    r->disposed = 1;
+    return Qnil;
+}
+
+static VALUE context_create_realm(VALUE self)
+{
+    Context *c;
+    VALUE a, e, result, realm_v;
+    Realm *r;
+    Buf b;
+
+    TypedData_Get_Struct(self, Context, &context_type, c);
+    if (atomic_load(&c->quit))
+        rb_raise(context_disposed_error, "disposed context");
+    buf_init(&b);
+    buf_putc(&b, 'B');     // (B)uild realm, returns [id, err]
+    a = rendezvous(c, &b); // takes ownership of |b|
+    e = rb_ary_pop(a);
+    handle_exception(e);
+    result = rb_ary_pop(a);
+
+    realm_v = rb_obj_alloc(realm_class); // skip the raising initialize
+    TypedData_Get_Struct(realm_v, Realm, &realm_type, r);
+    r->context = self;
+    r->id = NUM2INT(result);
+    r->disposed = 0;
+    return realm_v;
+}
+
 static VALUE context_pump_message_loop(VALUE self)
 {
     Context *c;
@@ -2857,6 +3068,7 @@ void Init_mini_racer_extension(void)
     rb_define_method(c, "heap_snapshot", context_heap_snapshot, 0);
     rb_define_method(c, "perform_microtask_checkpoint", context_perform_microtask_checkpoint, 0);
     rb_define_method(c, "reset_realm", context_reset_realm, 0);
+    rb_define_method(c, "create_realm", context_create_realm, 0);
     rb_define_method(c, "pump_message_loop", context_pump_message_loop, 0);
     rb_define_method(c, "low_memory_notification", context_low_memory_notification, 0);
     rb_define_method(c, "dynamic_import_resolver", context_get_dynamic_import_resolver, 0);
@@ -2883,6 +3095,16 @@ void Init_mini_racer_extension(void)
     rb_define_method(c, "dispose", module_dispose, 0);
     rb_define_method(c, "disposed?", module_disposed_p, 0);
     rb_define_alloc_func(c, module_alloc);
+
+    c = realm_class = rb_define_class_under(m, "Realm", rb_cObject);
+    rb_define_method(c, "initialize", realm_initialize, -1);
+    rb_define_method(c, "id", realm_id, 0);
+    rb_define_method(c, "eval", realm_eval, -1);
+    rb_define_method(c, "call", realm_call, -1);
+    rb_define_method(c, "attach", realm_attach, 2);
+    rb_define_method(c, "dispose", realm_dispose, 0);
+    rb_define_method(c, "disposed?", realm_disposed_p, 0);
+    rb_define_alloc_func(c, realm_alloc);
 
     c = snapshot_class = rb_define_class_under(m, "Snapshot", rb_cObject);
     rb_define_method(c, "initialize", snapshot_initialize, -1);

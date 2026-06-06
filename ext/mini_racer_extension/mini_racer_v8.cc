@@ -2668,6 +2668,54 @@ extern "C" void v8_dispose_realm(State *pst, const uint8_t *p, size_t n)
     reply_retry(st, v8::String::Empty(st.isolate));
 }
 
+// Run an op against a specific realm. Payload: [rid:int32][inner_op:1][inner
+// request bytes]. Enters realm rid (active_realm_id + locals + Context::Scope)
+// then delegates to the existing handler for inner_op, which replies as usual;
+// the caller's active realm is restored afterward.
+extern "C" void v8_realm_dispatch(State *pst, const uint8_t *p, size_t n)
+{
+    State& st = *pst;
+    int32_t rid = 0;
+    if (n >= 4) memcpy(&rid, p, sizeof(rid));
+    if (n < 5 || st.realms.find(rid) == st.realms.end()) {
+        // Unknown/malformed realm — reply an error so the Ruby side doesn't
+        // hang waiting for a response. The caller realm is still entered.
+        v8::TryCatch try_catch(st.isolate);
+        v8::HandleScope handle_scope(st.isolate);
+        auto msg = v8::String::NewFromUtf8Literal(st.isolate, "no such realm");
+        st.isolate->ThrowException(v8::Exception::Error(msg));
+        auto err = to_error(st, &try_catch, RUNTIME_ERROR);
+        reply_retry(st, err);
+        return;
+    }
+    uint8_t op = p[4];
+    const uint8_t *ip = p + 5;
+    size_t in = n - 5;
+    int32_t prev = st.active_realm_id;
+    st.active_realm_id = rid;
+    {
+        v8::HandleScope handle_scope(st.isolate);
+        restore_realm_locals(st);
+        v8::Context::Scope context_scope(st.context);
+        switch (op) {
+        case 'E': v8_eval(pst, ip, in); break;
+        case 'C': v8_call(pst, ip, in); break;
+        case 'A': v8_attach(pst, ip, in); break;
+        default:
+            // Op not realm-scoped (yet). Reply an error rather than hang.
+            v8::TryCatch try_catch(st.isolate);
+            auto msg = v8::String::NewFromUtf8Literal(st.isolate,
+                "operation is not supported on a realm");
+            st.isolate->ThrowException(v8::Exception::Error(msg));
+            auto err = to_error(st, &try_catch, RUNTIME_ERROR);
+            reply_retry(st, err);
+            break;
+        }
+    }
+    st.active_realm_id = prev;
+    restore_realm_locals(st);
+}
+
 extern "C" void v8_reset_realm(State *pst)
 {
     State& st = *pst;

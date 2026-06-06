@@ -1233,6 +1233,79 @@ class MiniRacerTest < Minitest::Test
     assert_operator(final, :<, baseline * 2)
   end
 
+  # -- per-frame realms (Context#create_realm / MiniRacer::Realm) --
+
+  def skip_on_truffleruby_realm
+    skip("Context#create_realm is not supported on TruffleRuby") if RUBY_ENGINE == "truffleruby"
+  end
+
+  def test_create_realm_returns_a_realm
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    realm = ctx.create_realm
+    assert_kind_of MiniRacer::Realm, realm
+    assert_kind_of Integer, realm.id
+    assert_equal 3, realm.eval("1 + 2")
+  end
+
+  def test_realm_global_is_isolated_from_the_main_realm
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    ctx.eval("globalThis.x = 1")
+    realm = ctx.create_realm
+    assert_equal "undefined", realm.eval("typeof globalThis.x")
+    realm.eval("globalThis.x = 99")
+    assert_equal 1, ctx.eval("globalThis.x")  # main realm unchanged
+    assert_equal 99, realm.eval("globalThis.x")
+  end
+
+  def test_realm_inherits_attached_host_functions
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    ctx.attach("hostAdd", ->(a, b) { a + b })
+    realm = ctx.create_realm
+    assert_equal 5, realm.eval("hostAdd(2, 3)")
+  end
+
+  def test_realm_call_and_attach
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    realm = ctx.create_realm
+    realm.eval("globalThis.f = (a) => a * 10")
+    assert_equal 40, realm.call("f", 4)
+    realm.attach("hostMul", ->(a, b) { a * b })
+    assert_equal 12, realm.eval("hostMul(3, 4)")
+  end
+
+  def test_multiple_realms_are_independent
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    a = ctx.create_realm
+    b = ctx.create_realm
+    refute_equal a.id, b.id
+    a.eval("globalThis.v = 'a'")
+    b.eval("globalThis.v = 'b'")
+    assert_equal "a", a.eval("globalThis.v")
+    assert_equal "b", b.eval("globalThis.v")
+  end
+
+  def test_realm_dispose
+    skip_on_truffleruby_realm
+    ctx = MiniRacer::Context.new
+    realm = ctx.create_realm
+    refute realm.disposed?
+    realm.dispose
+    assert realm.disposed?
+    assert_raises(MiniRacer::Error) { realm.eval("1") }
+    realm.dispose # idempotent
+  end
+
+  def test_create_realm_not_implemented_on_truffleruby
+    skip("only relevant on TruffleRuby") unless RUBY_ENGINE == "truffleruby"
+    ctx = MiniRacer::Context.new
+    assert_raises(NotImplementedError) { ctx.create_realm }
+  end
+
   def test_webassembly
     context = MiniRacer::Context.new()
     context.eval("let instance = null;")

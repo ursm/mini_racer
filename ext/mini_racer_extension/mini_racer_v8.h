@@ -62,6 +62,7 @@ void v8_terminate_execution(struct State *pst); // called from ruby or watchdog 
 void v8_reset_realm(struct State *pst);
 void v8_create_realm(struct State *pst);
 void v8_dispose_realm(struct State *pst, const uint8_t *p, size_t n);
+void v8_realm_dispatch(struct State *pst, const uint8_t *p, size_t n);
 void v8_threaded_enter(struct State *pst, struct Context *c, void (*f)(struct Context *c));
 void v8_single_threaded_enter(struct State *pst, struct Context *c, void (*f)(struct Context *c));
 void v8_single_threaded_dispose(struct State *pst);
