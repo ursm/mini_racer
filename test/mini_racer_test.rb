@@ -16,9 +16,6 @@ class MiniRacerTest < Minitest::Test
   MiniRacer::Platform.set_flags! :stress_snapshot
 
   def test_locale_mx
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not have all js timezone by default"
-    end
     val =
       MiniRacer::Context.new.eval(
         "new Date('April 28 2021').toLocaleDateString('es-MX');"
@@ -27,9 +24,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_locale_us
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not have all js timezone by default"
-    end
     val =
       MiniRacer::Context.new.eval(
         "new Date('April 28 2021').toLocaleDateString('en-US');"
@@ -40,9 +34,6 @@ class MiniRacerTest < Minitest::Test
   def test_locale_fr
     # TODO: this causes a segfault on Linux
 
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not have all js timezone by default"
-    end
     val =
       MiniRacer::Context.new.eval(
         "new Date('April 28 2021').toLocaleDateString('fr-FR');"
@@ -135,9 +126,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_it_can_timeout_during_serialization
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby needs a fix for timing out during translation"
-    end
     context = MiniRacer::Context.new(timeout: 500)
 
     assert_raises(MiniRacer::ScriptTerminatedError) do
@@ -262,7 +250,6 @@ class MiniRacerTest < Minitest::Test
   def test_date_nan
     # NoMethodError: undefined method `source_location' for "<internal:core>
     # core/float.rb:114:in `to_i'":Thread::Backtrace::Location
-    skip "TruffleRuby bug" if RUBY_ENGINE == "truffleruby"
     context = MiniRacer::Context.new
     assert_raises(RangeError) { context.eval("new Date(NaN)") } # should not crash process
   end
@@ -304,7 +291,6 @@ class MiniRacerTest < Minitest::Test
   def test_datetime_missing
     # NoMethodError: undefined method `source_location' for
     # #<Thread::Backtrace::Location:0x4e88>
-    skip "TruffleRuby bug" if RUBY_ENGINE == "truffleruby"
     date_time_backup = Object.send(:remove_const, :DateTime)
 
     begin
@@ -365,9 +351,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_max_memory
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement max_memory"
-    end
     context = MiniRacer::Context.new(max_memory: 200_000_000)
 
     assert_raises(MiniRacer::V8OutOfMemoryError) do
@@ -378,9 +361,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_max_memory_for_call
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement max_memory"
-    end
     context = MiniRacer::Context.new(max_memory: 100_000_000)
     context.eval(<<~JS)
       let s;
@@ -463,9 +443,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_snapshot_size
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement snapshots"
-    end
     snapshot = MiniRacer::Snapshot.new('var foo = "bar";')
 
     # for some reason sizes seem to change across runs, so we just
@@ -474,9 +451,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_snapshot_dump
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement snapshots"
-    end
     snapshot = MiniRacer::Snapshot.new('var foo = "bar";')
     dump = snapshot.dump
 
@@ -486,9 +460,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_snapshot_load
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement snapshots"
-    end
     snapshot = MiniRacer::Snapshot.new('var foo = "bar"; function hello() { return "world"; }')
     blob = snapshot.dump
 
@@ -503,9 +474,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_snapshot_load_with_non_binary_encoding
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement snapshots"
-    end
     snapshot = MiniRacer::Snapshot.new('var foo = "bar";')
     # Force non-binary encoding to exercise the coderange fix.
     # Binary data interpreted as UTF-8 will have broken encoding.
@@ -688,12 +656,6 @@ class MiniRacerTest < Minitest::Test
     context.attach(
       "marsh",
       proc do |a, b, c|
-        if a.is_a?(MiniRacer::FailedV8Conversion) ||
-             b.is_a?(MiniRacer::FailedV8Conversion) ||
-             c.is_a?(MiniRacer::FailedV8Conversion)
-          return a, b, c
-        end
-
         a[rand(10_000).to_s] = "a"
         b[rand(10_000).to_s] = "b"
         c[rand(10_000).to_s] = "c"
@@ -716,9 +678,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_estimated_size
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement heap_stats"
-    end
     context = MiniRacer::Context.new(timeout: 500)
     context.eval(<<~JS)
       let a='testing';
@@ -850,9 +809,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_heap_dump
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement heap_dump"
-    end
     f = Tempfile.new("heap")
     path = f.path
     f.unlink
@@ -878,20 +834,11 @@ class MiniRacerTest < Minitest::Test
 
   def test_symbol_support
     context = MiniRacer::Context.new()
-    if RUBY_ENGINE == "truffleruby"
-      # This seems the correct behavior, but it was changed in https://github.com/rubyjs/mini_racer/pull/325#discussion_r1907113432
-      assert_equal :foo, context.eval("Symbol('foo')")
-      assert_equal :undefined, context.eval("Symbol()") # should not crash
-    else
-      assert_equal "foo", context.eval("Symbol('foo')")
-      assert_nil context.eval("Symbol()") # should not crash
-    end
+    assert_equal "foo", context.eval("Symbol('foo')")
+    assert_nil context.eval("Symbol()") # should not crash
   end
 
   def test_infinite_object_js
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement marshal_stack_depth"
-    end
     context = MiniRacer::Context.new
     context.attach("a", proc { |a| a })
 
@@ -909,9 +856,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_deep_object_js
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not yet implement marshal_stack_depth"
-    end
     context = MiniRacer::Context.new
     context.attach("a", proc { |a| a })
 
@@ -925,9 +869,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_wasm_ref
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not support WebAssembly"
-    end
     context = MiniRacer::Context.new
     expected = {}
     actual =
@@ -987,17 +928,11 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_perform_microtask_checkpoint_returns_nil
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not implement perform_microtask_checkpoint (V8-only)"
-    end
     context = MiniRacer::Context.new
     assert_nil(context.perform_microtask_checkpoint)
   end
 
   def test_perform_microtask_checkpoint_drains_from_callback
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not implement perform_microtask_checkpoint (V8-only)"
-    end
     context = MiniRacer::Context.new
     seen    = []
 
@@ -1014,12 +949,8 @@ class MiniRacerTest < Minitest::Test
     assert_equal(%w[before-drain microtask-fired after-drain], seen)
   end
 
-  # Creates a context with the host namespace installed, skipping on backends
-  # that do not implement it (V8/CRuby only, like perform_microtask_checkpoint).
+  # Creates a context with the host namespace installed.
   def host_namespace_context(host_namespace: "MiniRacer", **options)
-    if RUBY_ENGINE == "truffleruby"
-      skip "host_namespace is only implemented on the V8 backend"
-    end
     MiniRacer::Context.new(host_namespace: host_namespace, **options)
   end
 
@@ -1038,8 +969,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_host_namespace_rejects_invalid_type
-    # CRuby (C Check_Type) raises TypeError; TruffleRuby (shared.rb) raises
-    # ArgumentError. Accept either so the test is backend-portable.
+    # A non-String/Symbol name is a type error (C Check_Type raises TypeError).
     assert_raises(TypeError, ArgumentError) do
       MiniRacer::Context.new(host_namespace: 123)
     end
@@ -1198,9 +1128,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def reset_realm_context(**options)
-    if RUBY_ENGINE == "truffleruby"
-      skip "reset_realm is only implemented on the V8 backend"
-    end
     MiniRacer::Context.new(**options)
   end
 
@@ -1250,13 +1177,6 @@ class MiniRacerTest < Minitest::Test
 
     # The context must remain healthy after the refusal.
     assert_equal(2, context.eval("1 + 1"))
-  end
-
-  def test_reset_realm_not_implemented_on_truffleruby
-    unless RUBY_ENGINE == "truffleruby"
-      skip "checks the TruffleRuby backend stub"
-    end
-    assert_raises(NotImplementedError) { MiniRacer::Context.new.reset_realm }
   end
 
   def test_reset_realm_reinstalls_host_namespace
@@ -1314,9 +1234,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_webassembly
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby does not enable WebAssembly by default"
-    end
     context = MiniRacer::Context.new()
     context.eval("let instance = null;")
     filename = File.expand_path("../support/add.wasm", __FILE__)
@@ -1394,18 +1311,11 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_forking
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby forking is not supported"
-    else
-      `bundle exec ruby test/test_forking.rb`
-      assert false, "forking test failed" if $?.exitstatus != 0
-    end
+    `bundle exec ruby test/test_forking.rb`
+    assert false, "forking test failed" if $?.exitstatus != 0
   end
 
   def test_poison
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby uses some extra JS code when creating/using a Context which seems to trigger the poison"
-    end
     context = MiniRacer::Context.new
     context.eval <<~JS
       const f = () => { throw "poison" }
@@ -1420,12 +1330,7 @@ class MiniRacerTest < Minitest::Test
     context = MiniRacer::Context.new
     expected = { "x" => 42, "y" => 43 }
     assert_equal expected, context.eval("new Map([['x', 42], ['y', 43]])")
-    if RUBY_ENGINE == "truffleruby"
-      # See https://github.com/rubyjs/mini_racer/pull/325#discussion_r1907187166
-      expected = [["x", 42], ["y", 43]]
-    else
-      expected = ["x", 42, "y", 43]
-    end
+    expected = ["x", 42, "y", 43]
     assert_equal expected,
                  context.eval("new Map([['x', 42], ['y', 43]]).entries()")
     expected = %w[x y]
@@ -1437,9 +1342,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_regexp_string_iterator
-    if RUBY_ENGINE == "truffleruby"
-      skip "TruffleRuby supports passing any object between JS and Ruby"
-    end
     context = MiniRacer::Context.new
     # TODO(bnoordhuis) maybe detect the iterator object and serialize
     # it as a string or array of strings; problem is there is no V8 API
@@ -1450,11 +1352,7 @@ class MiniRacerTest < Minitest::Test
 
   def test_function_property
     context = MiniRacer::Context.new
-    if RUBY_ENGINE == "truffleruby"
-      expected = { "m" => { 1 => 2, 3 => 4 }, "s" => {}, "x" => 42 }
-    else
-      expected = { "m" => { 1 => 2, 3 => 4 }, "s" => [5, 7, 11, 13], "x" => 42 }
-    end
+    expected = { "m" => { 1 => 2, 3 => 4 }, "s" => [5, 7, 11, 13], "x" => 42 }
     script = <<~JS
       ({
         f: () => {},
@@ -1488,10 +1386,8 @@ class MiniRacerTest < Minitest::Test
     assert_equal "ok", context.eval("'ok'".encode("UTF-16LE"))
     assert_equal Encoding::UTF_8, context.eval("'ok'").encoding
     assert_equal Encoding::UTF_8, context.eval("'ok\\uD800\\uDC00'").encoding
-    if RUBY_ENGINE != "truffleruby"
-      # unmatched surrogate pair, cannot be converted by ruby
-      assert_equal Encoding::UTF_16LE, context.eval("'ok\\uD800'").encoding
-    end
+    # unmatched surrogate pair, cannot be converted by ruby
+    assert_equal Encoding::UTF_16LE, context.eval("'ok\\uD800'").encoding
   end
 
   def test_object_ref
@@ -1515,16 +1411,10 @@ class MiniRacerTest < Minitest::Test
   def test_ruby_exception
     context = MiniRacer::Context.new
     context.attach("test", proc { raise "boom" })
-    line = __LINE__ - 1
     actual = context.eval("try { test() } catch (e) { e }")
     assert_equal(actual.class, MiniRacer::ScriptError)
     assert_equal(actual.message, "boom")
-    if RUBY_ENGINE == "truffleruby"
-      assert_includes(actual.backtrace[0], "#{__FILE__}:#{line}")
-      assert_includes(actual.backtrace[0], "block in MiniRacerTest#test_ruby_exception")
-    else
-      assert_equal(actual.backtrace, ["JavaScript Error: boom", "JavaScript at <eval>:1:7"])
-    end
+    assert_equal(actual.backtrace, ["JavaScript Error: boom", "JavaScript at <eval>:1:7"])
   end
 
   def test_large_integer
@@ -1544,11 +1434,7 @@ class MiniRacerTest < Minitest::Test
       assert_equal(result.class, big_int.class)
       assert_equal(result, big_int)
     }
-    if RUBY_ENGINE == "truffleruby"
-      assert_equal(types, %w[number number number number])
-    else
-      assert_equal(types, %w[number bigint number bigint])
-    end
+    assert_equal(types, %w[number bigint number bigint])
   end
 
   def test_uint8array_is_converted_to_string
@@ -1586,11 +1472,7 @@ class MiniRacerTest < Minitest::Test
     MiniRacer::Context.new
 
     assert_kind_of Integer, MiniRacer::V8_CACHED_DATA_VERSION_TAG
-    if RUBY_ENGINE == "truffleruby"
-      assert_equal 0, MiniRacer::V8_CACHED_DATA_VERSION_TAG
-    else
-      refute_equal 0, MiniRacer::V8_CACHED_DATA_VERSION_TAG
-    end
+    refute_equal 0, MiniRacer::V8_CACHED_DATA_VERSION_TAG
     # Stable across calls.
     assert_equal MiniRacer::V8_CACHED_DATA_VERSION_TAG, MiniRacer::V8_CACHED_DATA_VERSION_TAG
   end
@@ -1604,7 +1486,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_filename_in_parse_error
-    skip_on_truffleruby_compile_parse
     err = assert_raises(MiniRacer::ParseError) do
       MiniRacer::Context.new.compile("function foo(", filename: "bundle.js")
     end
@@ -1612,17 +1493,9 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_invalid_source
-    skip_on_truffleruby_compile_parse
     assert_raises(MiniRacer::ParseError) do
       MiniRacer::Context.new.compile("foo bar baz garbage")
     end
-  end
-
-  # TruffleRuby's Context#compile shim is lazy (it wraps the source and replays
-  # it through Context#eval on Script#run), so syntax errors surface at run
-  # time, not at compile time. The compile-time ParseError is V8-specific.
-  def skip_on_truffleruby_compile_parse
-    skip("TruffleRuby compiles lazily; parse errors surface at run, not compile") if RUBY_ENGINE == "truffleruby"
   end
 
   def test_compile_runtime_error
@@ -1635,7 +1508,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_cached_data_save_restore
-    skip "TruffleRuby has no equivalent caching API" if RUBY_ENGINE == "truffleruby"
 
     src = "function sq(x) { return x * x } sq(7)"
     ctx_a = MiniRacer::Context.new
@@ -1656,7 +1528,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_cached_data_rejection
-    skip "TruffleRuby has no equivalent caching API" if RUBY_ENGINE == "truffleruby"
 
     src = "function sq(x) { return x * x } sq(7)"
     corrupt = ("garbage" * 100).b
@@ -1670,7 +1541,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_default_skips_cache_production
-    skip "TruffleRuby has no equivalent caching API" if RUBY_ENGINE == "truffleruby"
 
     ctx = MiniRacer::Context.new
     script = ctx.compile("1 + 1", filename: "no_cache.js")
@@ -1680,7 +1550,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_produce_cache_inside_host_fn_raises
-    skip "TruffleRuby has no equivalent caching API" if RUBY_ENGINE == "truffleruby"
 
     ctx = MiniRacer::Context.new
     caught = nil
@@ -1698,7 +1567,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_inside_host_fn_default_is_safe
-    skip "TruffleRuby has no equivalent caching API" if RUBY_ENGINE == "truffleruby"
 
     # Without produce_cache, repeated re-entrant compiles must not crash —
     # this is the path Discourse-style embedders take from their inline-script
@@ -1748,7 +1616,7 @@ class MiniRacerTest < Minitest::Test
     ctx.dispose
     assert_raises(MiniRacer::ContextDisposedError) { script.run }
     # cached_data is still readable — it was stashed at compile time
-    refute_nil script.cached_data unless RUBY_ENGINE == "truffleruby"
+    refute_nil script.cached_data
     # dispose on script after context dispose is a no-op
     assert_nil script.dispose
   end
@@ -1771,12 +1639,7 @@ class MiniRacerTest < Minitest::Test
 
   # -- ES module API (Context#compile_module / MiniRacer::Module) --
 
-  def skip_on_truffleruby_module
-    skip("TruffleRuby has no equivalent ES module handle") if RUBY_ENGINE == "truffleruby"
-  end
-
   def test_compile_module_returns_handle
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     assert_kind_of MiniRacer::Module, mod
@@ -1784,7 +1647,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_module_parse_error
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     assert_raises(MiniRacer::ParseError) do
       ctx.compile_module("this is not valid", filename: "bad.js")
@@ -1792,7 +1654,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_compile_module_accepts_import_declaration
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("import { x } from 'other'; export const y = x + 1",
                              filename: "imp.js")
@@ -1800,12 +1661,10 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_new_direct_raises
-    skip_on_truffleruby_module
     assert_raises(MiniRacer::RuntimeError) { MiniRacer::Module.new }
   end
 
   def test_module_dispose_idempotent
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     mod.dispose
@@ -1814,7 +1673,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_after_context_dispose
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     ctx.dispose
@@ -1823,14 +1681,12 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_status_starts_uninstantiated
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     assert_equal :uninstantiated, mod.status
   end
 
   def test_module_status_after_dispose_raises
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     mod.dispose
@@ -1838,7 +1694,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_no_imports_skips_resolver
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     mod.instantiate { raise "resolver should not be called" }
@@ -1846,7 +1701,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_calls_resolver_with_specifier
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     dep = ctx.compile_module("export const y = 7", filename: "dep.js")
     main = ctx.compile_module("import { y } from 'dep'; export const z = y * 2",
@@ -1859,14 +1713,12 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_requires_block
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     assert_raises(ArgumentError) { mod.instantiate }
   end
 
   def test_module_instantiate_resolver_returning_non_module_raises
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("import 'foo'", filename: "m.js")
     err = assert_raises(MiniRacer::RuntimeError) do
@@ -1876,7 +1728,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_resolver_exception_bubbles_original_class
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("import 'foo'", filename: "m.js")
     err = assert_raises(ArgumentError) do
@@ -1886,7 +1737,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_resolves_transitively
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     a = ctx.compile_module("export const a = 1", filename: "a.js")
     b = ctx.compile_module("import { a } from 'a'; export const b = a + 1", filename: "b.js")
@@ -1899,7 +1749,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_passes_referrer_url_to_resolver
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     dep = ctx.compile_module("export const y = 1", filename: "lib/dep.js")
     main = ctx.compile_module("import { y } from './dep'; export const z = y",
@@ -1913,7 +1762,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_import_meta_url_is_populated
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("globalThis.metaUrl = import.meta.url",
                              filename: 'src/entry.js')
@@ -1923,7 +1771,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_filename_with_embedded_nul_survives_roundtrip
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     name = "a\0b.js"
     mod = ctx.compile_module('globalThis.url = import.meta.url', filename: name)
@@ -1933,7 +1780,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_evaluate_before_instantiate_raises
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module('export const x = 1', filename: 'a.js')
     err = assert_raises(MiniRacer::RuntimeError) { mod.evaluate }
@@ -1941,7 +1787,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_resolver_rejects_module_from_other_context
-    skip_on_truffleruby_module
     ctx_a = MiniRacer::Context.new
     ctx_b = MiniRacer::Context.new
     foreign = ctx_a.compile_module('export const x = 1', filename: 'a.js')
@@ -1953,7 +1798,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_resolver_resolves_with_namespace
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     dep = ctx.compile_module('export const x = 42', filename: 'dep.js')
     dep.instantiate { raise 'resolver should not be called' }
@@ -1971,7 +1815,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_without_resolver_rejects
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     ctx.eval(<<~JS, filename: 'main.js')
       import('foo').catch(e => { globalThis.err = String(e) })
@@ -1981,7 +1824,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_resolver_rejects_module_from_other_context
-    skip_on_truffleruby_module
     ctx_a = MiniRacer::Context.new
     ctx_b = MiniRacer::Context.new
     foreign = ctx_a.compile_module('export const x = 1', filename: 'a.js')
@@ -1996,7 +1838,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_resolver_auto_evaluates_pending_module
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     dep = ctx.compile_module('globalThis.evaled = (globalThis.evaled||0)+1; export const x = 7',
                              filename: 'dep.js')
@@ -2011,7 +1852,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_auto_evaluate_drains_module_body_microtasks
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     dep = ctx.compile_module(<<~JS, filename: 'dep.js')
       globalThis.t = 0;
@@ -2030,7 +1870,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_dynamic_import_resolver_setter_type_check
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     assert_raises(TypeError) { ctx.dynamic_import_resolver = 42 }
     ctx.dynamic_import_resolver = nil
@@ -2041,7 +1880,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_dispose_releases_handles_eagerly
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     before = ctx.heap_stats[:used_heap_size]
     1000.times do |i|
@@ -2055,7 +1893,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_instantiate_resolver_can_compile_lazily
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     sources = {
       "tip"  => "import { mid } from 'mid'; export const tip = mid + 'tip'",
@@ -2072,7 +1909,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_evaluate_returns_undefined_for_simple_module
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 42", filename: "a.js")
     mod.instantiate { raise "resolver should not be called" }
@@ -2080,7 +1916,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_evaluate_runtime_error_propagates
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("throw new Error('boom')", filename: "bad.js")
     mod.instantiate { raise "resolver should not be called" }
@@ -2089,7 +1924,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_evaluate_top_level_await_unsupported
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     tla = ctx.compile_module(
       "await new Promise((resolve) => setTimeout(resolve, 1)); export const x = 1",
@@ -2102,7 +1936,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_namespace_data_exports
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module(
       "export const a = 1; export const b = 'two'; export const c = [3, 4]",
@@ -2113,7 +1946,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_namespace_includes_default_export
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module(
       "const v = { kind: 'obj', n: 7 }; export default v",
@@ -2124,14 +1956,12 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_namespace_before_instantiate_raises
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     assert_raises(MiniRacer::RuntimeError) { mod.namespace }
   end
 
   def test_module_status_transitions
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const v = 5", filename: "a.js")
     assert_equal :uninstantiated, mod.status
@@ -2142,7 +1972,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_imports_provide_runtime_bindings
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     dep = ctx.compile_module("export const base = 10", filename: "dep.js")
     main = ctx.compile_module(
@@ -2155,7 +1984,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_module_evaluate_idempotent
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     mod = ctx.compile_module("export const x = 1", filename: "a.js")
     mod.instantiate { raise "resolver should not be called" }
@@ -2166,7 +1994,6 @@ class MiniRacerTest < Minitest::Test
   def test_module_accumulation_freed_by_context_dispose
     # Many short-lived modules accumulate handles until ctx.dispose, which
     # walks st.modules under the still-live isolate before tearing it down.
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     100.times {|i| ctx.compile_module("export const v#{i} = #{i}", filename: "m#{i}.js") }
     ctx.dispose
@@ -2188,7 +2015,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_evaluates_whole_graph
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     sources = {
       "/app.js" => 'import {a} from "./a.js"; import {b} from "./b.js"; globalThis.RESULT = a + b;',
@@ -2205,7 +2031,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_batches_callbacks_per_level
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     sources = {
       "/app.js" => 'import {a} from "./a.js"; import {b} from "./b.js";',
@@ -2226,7 +2051,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_populates_import_meta_url
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     resolve, fetch = graph_loader({ "/m.js" => "globalThis.META = import.meta.url; export const x = 1;" })
     ctx.load_module_graph("/m.js", resolve: resolve, fetch_batch: fetch)
@@ -2234,7 +2058,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_missing_dependency_fails_gracefully
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     # fetch returns nil for the (resolved) missing dependency.
     resolve, fetch = graph_loader({ "/e.js" => 'import {z} from "./missing.js"; export const y = z;' })
@@ -2246,7 +2069,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_consumes_cached_data
-    skip_on_truffleruby_module
     body = "export const v = 42;"
     cache = MiniRacer::Context.new.compile_module(body, filename: "/v.js", produce_cache: true).cached_data
     refute_nil(cache)
@@ -2261,7 +2083,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_reports_rejected_cache
-    skip_on_truffleruby_module
     # A code cache produced for one source is rejected when consumed against a
     # different source (the cross-process-cache version/content mismatch case).
     stale = MiniRacer::Context.new.compile_module("export const v = 1;",
@@ -2274,7 +2095,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_propagates_callback_exception
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     boom = Class.new(StandardError)
     assert_raises(boom) do
@@ -2286,14 +2106,12 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_requires_callables
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     assert_raises(ArgumentError) { ctx.load_module_graph("/x.js", resolve: nil, fetch_batch: ->(u) { [] }) }
     assert_raises(ArgumentError) { ctx.load_module_graph("/x.js", resolve: ->(e) { [] }, fetch_batch: nil) }
   end
 
   def test_load_module_graph_handles_cyclic_imports
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     # a.js <-> b.js form a legal ES module cycle.
     sources = {
@@ -2308,7 +2126,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_fetches_shared_dependency_once
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     # Diamond: app -> {left, right} -> shared. shared must be fetched once.
     sources = {
@@ -2327,7 +2144,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_dynamic_import_reuses_loaded_module
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     # The entry statically imports shared and mutates it; a later dynamic
     # import() of the same URL must see the SAME Module instance (n == 42), not
@@ -2351,7 +2167,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_dynamic_import_loads_new_subgraph
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     # lazy.js is not in the static graph; the runtime dynamic import must walk
     # and load it on demand via the persisted fetch/resolve callbacks.
@@ -2368,7 +2183,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_relists_only_newly_compiled_modules
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     sources = {
       "/a.js"      => 'import "./shared.js"; export const a = 1;',
@@ -2387,7 +2201,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_rolls_back_a_failed_load
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     full = {
       "/entry.js" => 'import {x} from "./dep.js"; globalThis.X = x;',
@@ -2409,7 +2222,6 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_load_module_graph_refuses_reset_realm_from_callback
-    skip_on_truffleruby_module
     ctx = MiniRacer::Context.new
     # reset_realm during a fetch/resolve callback would tear the realm out from
     # under the in-flight graph load; in_callback must make it refuse.

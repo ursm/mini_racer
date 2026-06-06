@@ -31,7 +31,7 @@ The fork is periodically rebased on upstream `mini_racer` to pick up V8 / `libv8
 
 ## Supported Ruby Versions & Troubleshooting
 
-MiniRacer only supports non-EOL versions of Ruby. See [Ruby Maintenance Branches](https://www.ruby-lang.org/en/downloads/branches/) for the list of non-EOL Rubies. If you require support for older versions of Ruby install an older version of the gem. [TruffleRuby](https://github.com/oracle/truffleruby) is also supported.
+MiniRacer only supports non-EOL versions of Ruby. See [Ruby Maintenance Branches](https://www.ruby-lang.org/en/downloads/branches/) for the list of non-EOL Rubies. If you require support for older versions of Ruby install an older version of the gem. (The `mini_racer-csim` fork is CRuby/V8 only — the TruffleRuby backend that upstream supports has been removed.)
 
 MiniRacer **does not support**
 
@@ -228,10 +228,6 @@ Notes:
   reuse still works under `:single_threaded`. If you need both cross-process
   reuse and `:single_threaded` (e.g. for fork-safety reasons), disable
   `:single_threaded` for the path that produces / consumes the cache.
-- On TruffleRuby, `Script` is implemented as source replay (GraalJS has no
-  equivalent per-script bytecode cache reachable from `Polyglot::InnerContext`),
-  so `cached_data` and `produce_cache` are silently ignored and `cached_data`
-  always returns `nil`, and `MiniRacer::V8_CACHED_DATA_VERSION_TAG` is `0`.
 
 ### Fork Safety
 
@@ -501,7 +497,7 @@ context.eval("log")
 # => ["before", "microtask", "after"]
 ```
 
-`host_namespace:` accepts a String (the global name to use — it must be a valid JavaScript identifier), `true` (the default name `"MiniRacer"`), or `nil`/`false` (the default — inject nothing). The namespace object is defined non-enumerable so it does not appear in `Object.keys(globalThis)`, while its methods are ordinary properties discoverable via `Object.keys(MiniRacer)`. Like `perform_microtask_checkpoint`, `drainMicrotasks()` is a no-op while a microtask checkpoint is already in progress, and it lets watchdog/out-of-memory termination propagate to the enclosing `eval`/`call`. (The host namespace is V8-only; it is not installed on the TruffleRuby backend.)
+`host_namespace:` accepts a String (the global name to use — it must be a valid JavaScript identifier), `true` (the default name `"MiniRacer"`), or `nil`/`false` (the default — inject nothing). The namespace object is defined non-enumerable so it does not appear in `Object.keys(globalThis)`, while its methods are ordinary properties discoverable via `Object.keys(MiniRacer)`. Like `perform_microtask_checkpoint`, `drainMicrotasks()` is a no-op while a microtask checkpoint is already in progress, and it lets watchdog/out-of-memory termination propagate to the enclosing `eval`/`call`.
 
 ### ES modules
 
@@ -570,9 +566,6 @@ Notes:
   accumulate handles until `Context#dispose` clears them.
 - Top-level await is not yet supported; `evaluate` raises if the
   module's evaluation promise stays pending after the microtask drain.
-- On TruffleRuby, `Context#compile_module` raises `NotImplementedError`
-  — GraalJS has its own module-loading mechanism that doesn't map onto
-  this handle-based API. PRs to bridge are welcome.
 
 ## Performance
 

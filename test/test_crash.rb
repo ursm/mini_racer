@@ -24,8 +24,6 @@ def test2
   context = MiniRacer::Context.new(timeout: 5)
 
   context.attach("marsh", proc do |a, b, c|
-    return [a,b,c] if a.is_a?(MiniRacer::FailedV8Conversion) || b.is_a?(MiniRacer::FailedV8Conversion) || c.is_a?(MiniRacer::FailedV8Conversion)
-
     a[rand(10000).to_s] = "a"
     b[rand(10000).to_s] = "b"
     c[rand(10000).to_s] = "c"
