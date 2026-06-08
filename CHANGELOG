@@ -1,3 +1,6 @@
+- 0.21.1.4 - 08-06-2026
+  - Memoize the safe-context reply filter (the recursive deep-copy fallback used when a reply value is not cloneable by V8's ValueSerializer — e.g. it contains a function or a host object). A visited-set (original → filtered copy) makes shared subgraphs clone once instead of being re-walked per reference path (O(N) instead of super-linear), terminates cycles (previously a cyclic value containing a non-cloneable member recursed forever), and preserves object identity — matching the ValueSerializer fast path it backs
+
 - 0.21.1.3 - 08-06-2026
   - **Breaking (realm JS API):** move the per-frame-realm JS helpers off bare `globalThis` globals onto the opt-in host namespace, so globalThis pollution is decided once (by `host_namespace:`) rather than per feature
     - `__mr_realmGlobal(id)` → `<host_namespace>.realmGlobal(id)`

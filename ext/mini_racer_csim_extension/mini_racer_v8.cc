@@ -23,44 +23,61 @@ static const char safe_context_script_source[] = R"js(
 ;(function($globalThis) {
     const {Map: $Map, Set: $Set} = $globalThis
     const sentinel = {}
-    return function filter(v) {
-        if (typeof v === "function")
-            return sentinel
-        if (typeof v !== "object" || v === null)
-            return v
-        if (v instanceof $Map) {
-            const m = new Map()
-            for (let [k, t] of Map.prototype.entries.call(v)) {
-                t = filter(t)
-                if (t !== sentinel)
-                    m.set(k, t)
-            }
-            return m
-        } else if (v instanceof $Set) {
-            const s = new Set()
-            for (let t of Set.prototype.values.call(v)) {
-                t = filter(t)
-                if (t !== sentinel)
-                    s.add(t)
-            }
-            return s
-        } else {
-            const o = Array.isArray(v) ? [] : {}
-            const pds = Object.getOwnPropertyDescriptors(v)
-            for (const [k, d] of Object.entries(pds)) {
-                if (!d.enumerable)
-                    continue
-                let t = d.value
-                if (d.get) {
-                    // *not* d.get.call(...), may have been tampered with
-                    t = Function.prototype.call.call(d.get, v, k)
+    return function filter(root) {
+        // Memoize original -> filtered copy. Registered BEFORE recursing into a
+        // value's children so that a value reachable by many paths is cloned
+        // once (linear, not super-linear: e.g. a DOM node's ownerDocument is
+        // reachable from every node), cycles terminate (the in-progress copy is
+        // returned), and object identity is preserved. This matches V8's
+        // ValueSerializer (the fast path this is the fallback for), whose ref
+        // table also dedupes and handles cycles; without it the slow path both
+        // diverges (duplicates shared objects) and can recurse forever on a
+        // cyclic value that happens to contain a non-cloneable member.
+        const seen = new Map()
+        return (function rec(v) {
+            if (typeof v === "function")
+                return sentinel
+            if (typeof v !== "object" || v === null)
+                return v
+            if (seen.has(v))
+                return seen.get(v)
+            if (v instanceof $Map) {
+                const m = new Map()
+                seen.set(v, m)
+                for (let [k, t] of Map.prototype.entries.call(v)) {
+                    t = rec(t)
+                    if (t !== sentinel)
+                        m.set(k, t)
                 }
-                t = filter(t)
-                if (t !== sentinel)
-                    Object.defineProperty(o, k, {value: t, enumerable: true})
+                return m
+            } else if (v instanceof $Set) {
+                const s = new Set()
+                seen.set(v, s)
+                for (let t of Set.prototype.values.call(v)) {
+                    t = rec(t)
+                    if (t !== sentinel)
+                        s.add(t)
+                }
+                return s
+            } else {
+                const o = Array.isArray(v) ? [] : {}
+                seen.set(v, o)
+                const pds = Object.getOwnPropertyDescriptors(v)
+                for (const [k, d] of Object.entries(pds)) {
+                    if (!d.enumerable)
+                        continue
+                    let t = d.value
+                    if (d.get) {
+                        // *not* d.get.call(...), may have been tampered with
+                        t = Function.prototype.call.call(d.get, v, k)
+                    }
+                    t = rec(t)
+                    if (t !== sentinel)
+                        Object.defineProperty(o, k, {value: t, enumerable: true})
+                }
+                return o
             }
-            return o
-        }
+        })(root)
     }
 })
 )js";

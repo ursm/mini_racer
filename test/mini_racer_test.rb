@@ -2,6 +2,7 @@
 
 require "securerandom"
 require "date"
+require "timeout"
 require "test_helper"
 
 class MiniRacerTest < Minitest::Test
@@ -143,6 +144,25 @@ class MiniRacerTest < Minitest::Test
     context = MiniRacerCsim::Context.new
     assert_same MiniRacerCsim::JavaScriptFunction,
                 context.eval("var a = function(){}; a").class
+  end
+
+  def test_reply_filter_memoizes_shared_subgraphs
+    context = MiniRacerCsim::Context.new
+    # A nested function makes the return value non-cloneable by V8's
+    # ValueSerializer, so the reply takes the safe-context filter slow path. The
+    # leaf is then shared down an exponential number of paths: without a
+    # visited-set the filter re-walks all 2**30 of them and never returns; with
+    # memoization it clones each level once (O(N)) and finishes instantly.
+    result =
+      Timeout.timeout(20) do
+        context.eval(<<~JS)
+          let x = { fn: function () {} };
+          for (let i = 0; i < 30; i++) x = { a: x, b: x };
+          x;
+        JS
+      end
+    # Slow path ran (the function leaf was dropped) and it terminated.
+    assert_kind_of(Hash, result)
   end
 
   def test_it_handles_malformed_js
