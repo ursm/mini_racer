@@ -134,6 +134,11 @@ struct Realm
     // graph_resolve_callback can resolve imports from the pre-walked graph
     // with zero Ruby round-trips. Null otherwise.
     struct GraphLoad *active_graph = nullptr;
+    // Embedder-registered handler for promises that reject with no handler in
+    // this realm, set via <host_namespace>.onUnhandledRejection(fn). Called by
+    // notify_unhandled_rejections with (reason, promise). Global so its dtor
+    // releases the function when the realm is disposed; reset on reset_realm.
+    v8::Global<v8::Function> unhandled_rejection_handler;
 };
 
 struct State
@@ -768,13 +773,14 @@ void v8_drain_microtasks_callback(const v8::FunctionCallbackInfo<v8::Value>& inf
     info.GetReturnValue().SetUndefined();
 }
 
-// __mr_realmGlobal(id): returns the globalThis of realm `id` as a LIVE V8
-// object in the calling realm (same isolate, not a copy), or undefined for an
-// unknown realm. Installed on every realm's global. Because all realms share
-// one security token (see install_realm), the caller can read/write the
-// returned global's properties — this is how csim wires frames[i] /
-// iframe.contentWindow to the right realm. Cross-realm object identity holds:
-// mutating a property here is visible in the target realm and vice versa.
+// <host_namespace>.realmGlobal(id): returns the globalThis of realm `id` as a
+// LIVE V8 object in the calling realm (same isolate, not a copy), or undefined
+// for an unknown realm. Hung off the host namespace (opt-in via
+// Context.new(host_namespace:)) rather than a bare global, so globalThis stays
+// unpolluted. Because all realms share one security token (see install_realm),
+// the caller can read/write the returned global's properties — this is how csim
+// wires frames[i] / iframe.contentWindow to the right realm. Cross-realm object
+// identity holds: mutating a property here is visible in the target realm.
 void v8_realm_global_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
 {
     auto isolate = info.GetIsolate();
@@ -815,13 +821,13 @@ static int32_t realm_id_of_context(v8::Local<v8::Context> ctx)
     return v.As<v8::Int32>()->Value();
 }
 
-// __mr_realmOf(fn): returns the realm id where `fn` (any object/function) was
-// created — its [[Realm]] / creation context — or undefined if unknown. This is
-// the realm WebIDL's "invoke a callback function" reports errors against (e.g.
-// a setTimeout callback's uncaught throw is reported on the realm that *created*
-// the callback, not the scheduling realm nor the thrown Error's realm). csim
-// uses it to dispatch an ErrorEvent on __mr_realmGlobal(__mr_realmOf(cb)) from
-// its own per-callback try/catch.
+// <host_namespace>.realmOf(fn): returns the realm id where `fn` (any
+// object/function) was created — its [[Realm]] / creation context — or
+// undefined if unknown. This is the realm WebIDL's "invoke a callback function"
+// reports errors against (e.g. a setTimeout callback's uncaught throw is
+// reported on the realm that *created* the callback, not the scheduling realm
+// nor the thrown Error's realm). csim uses it to dispatch an ErrorEvent on
+// <ns>.realmGlobal(<ns>.realmOf(cb)) from its own per-callback try/catch.
 void v8_realm_of_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
 {
     auto isolate = info.GetIsolate();
@@ -840,6 +846,27 @@ void v8_realm_of_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
         return;
     }
     info.GetReturnValue().Set(v8::Integer::New(isolate, rid));
+}
+
+// <host_namespace>.onUnhandledRejection(fn): register fn as the calling realm's
+// handler for promises that reject with no handler. notify_unhandled_rejections
+// calls it with (reason, promise) at the next microtask checkpoint, entered in
+// the rejecting promise's realm (HTML notify-rejected-promises). The handler is
+// stored per realm (keyed by the calling context's realm id) instead of as a
+// bare globalThis property, so globalThis stays unpolluted. Passing a non-
+// function clears the handler.
+void v8_set_unhandled_rejection_handler(const v8::FunctionCallbackInfo<v8::Value>& info)
+{
+    auto isolate = info.GetIsolate();
+    State& st = *static_cast<State*>(isolate->GetData(0));
+    int32_t rid = realm_id_of_context(isolate->GetCurrentContext());
+    auto it = st.realms.find(rid);
+    if (it == st.realms.end())
+        return; // unknown realm: no-op
+    if (info.Length() >= 1 && info[0]->IsFunction())
+        it->second->unhandled_rejection_handler.Reset(isolate, info[0].As<v8::Function>());
+    else
+        it->second->unhandled_rejection_handler.Reset();
 }
 
 // V8 calls this when a promise's rejection state changes. We implement the
@@ -1041,12 +1068,13 @@ static void clear_realm_locals(State& st)
 }
 
 // HTML notify-rejected-promises: for each promise that rejected with no handler
-// since the last checkpoint, enter its realm and call the embedder's
-// globalThis.__mr_emitUnhandledRejection(reason, promise) if present (csim
-// turns that into a PromiseRejectionEvent so addEventListener('unhandledrejection')
-// fires natively in the right realm). The list is snapshotted and cleared first
-// so rejections triggered by a handler queue for the next checkpoint instead of
-// looping. A realm disposed in the meantime is skipped.
+// since the last checkpoint, enter its realm and call that realm's handler
+// (registered via <host_namespace>.onUnhandledRejection) with (reason, promise)
+// if one was set (csim turns that into a PromiseRejectionEvent so
+// addEventListener('unhandledrejection') fires natively in the right realm). The
+// list is snapshotted and cleared first so rejections triggered by a handler
+// queue for the next checkpoint instead of looping. A realm disposed in the
+// meantime is skipped.
 static void notify_unhandled_rejections(State& st)
 {
     if (st.pending_rejections.empty())
@@ -1067,18 +1095,17 @@ static void notify_unhandled_rejections(State& st)
         auto context = v8::Local<v8::Context>::New(st.isolate, it->second->persistent_context);
         if (context.IsEmpty())
             continue;
+        if (it->second->unhandled_rejection_handler.IsEmpty())
+            continue; // realm registered no onUnhandledRejection handler
         st.active_realm_id = pr.second;
         restore_realm_locals(st);
         v8::Context::Scope context_scope(context);
         auto global = context->Global();
-        auto name = v8::String::NewFromUtf8Literal(st.isolate, "__mr_emitUnhandledRejection");
-        v8::Local<v8::Value> hook;
-        if (!global->Get(context, name).ToLocal(&hook) || !hook->IsFunction())
-            continue;
+        auto hook = v8::Local<v8::Function>::New(st.isolate, it->second->unhandled_rejection_handler);
         auto promise = v8::Local<v8::Promise>::New(st.isolate, pr.first);
         v8::TryCatch try_catch(st.isolate); // swallow errors from the handler itself
         v8::Local<v8::Value> args[2] = { promise->Result(), promise };
-        (void)hook.As<v8::Function>()->Call(context, global, 2, args);
+        (void)hook->Call(context, global, 2, args);
     }
     st.active_realm_id = prev;
     st.context = saved_context;
@@ -1133,45 +1160,39 @@ static bool install_realm(State& st)
     v8::Context::Scope context_scope(context);
     // If the embedder opted in via Context.new(host_namespace:), install a
     // single host-namespace object (in the spirit of Deno's `Deno` / Bun's
-    // `Bun`) under that global name and hang native helpers off it. The object
-    // closes over native code pointers so it cannot live in the (de)serialized
-    // snapshot; it is installed here on every fresh realm. The namespace is
-    // non-enumerable on globalThis so it stays out of Object.keys(globalThis)/
-    // for-in; its methods are ordinary enumerable properties so they remain
-    // discoverable on the object.
+    // `Bun`) under that global name and hang EVERY native JS helper off it:
+    // drainMicrotasks(), realmGlobal(id), realmOf(fn), onUnhandledRejection(fn).
+    // Keeping them on one opt-in object (rather than bare __mr_* globals) means
+    // globalThis pollution is decided once, by the opt-in — not relitigated per
+    // feature. The object closes over native code pointers so it cannot live in
+    // the (de)serialized snapshot; it is installed here on every fresh realm.
+    // The namespace is non-enumerable on globalThis (out of Object.keys/for-in);
+    // its methods are ordinary properties so they remain discoverable.
+    //
+    // Consequence: the JS-side realm-reflection helpers (realmGlobal/realmOf)
+    // and per-realm unhandled-rejection delivery require host_namespace. Realms
+    // themselves do NOT — Context#create_realm + Realm#eval/call/attach work
+    // without it (isolated realms driven from Ruby); only cross-realm wiring *in
+    // JS* needs these helpers, which is why they live on the namespace.
     if (!st.host_namespace.empty()) {
         v8::Local<v8::String> ns_name;
         if (!v8::String::NewFromUtf8(st.isolate, st.host_namespace.c_str()).ToLocal(&ns_name))
             return false;
         auto ns = v8::Object::New(st.isolate);
         auto data = v8::External::New(st.isolate, pst);
-        auto drain_name = v8::String::NewFromUtf8Literal(st.isolate, "drainMicrotasks");
-        v8::Local<v8::Function> drain;
-        if (!v8::Function::New(context, v8_drain_microtasks_callback, data).ToLocal(&drain))
-            return false;
-        if (!ns->Set(context, drain_name, drain).FromMaybe(false)) return false;
+        v8::Local<v8::Function> drain, rg, ro, onrej;
+        // drainMicrotasks + realmGlobal read State via info.Data() (the External);
+        // realmOf + onUnhandledRejection take none (onUnhandledRejection uses
+        // isolate->GetData(0)), so they are created without data.
+        if (!v8::Function::New(context, v8_drain_microtasks_callback, data).ToLocal(&drain)) return false;
+        if (!v8::Function::New(context, v8_realm_global_callback, data).ToLocal(&rg)) return false;
+        if (!v8::Function::New(context, v8_realm_of_callback).ToLocal(&ro)) return false;
+        if (!v8::Function::New(context, v8_set_unhandled_rejection_handler).ToLocal(&onrej)) return false;
+        if (!ns->Set(context, v8::String::NewFromUtf8Literal(st.isolate, "drainMicrotasks"), drain).FromMaybe(false)) return false;
+        if (!ns->Set(context, v8::String::NewFromUtf8Literal(st.isolate, "realmGlobal"), rg).FromMaybe(false)) return false;
+        if (!ns->Set(context, v8::String::NewFromUtf8Literal(st.isolate, "realmOf"), ro).FromMaybe(false)) return false;
+        if (!ns->Set(context, v8::String::NewFromUtf8Literal(st.isolate, "onUnhandledRejection"), onrej).FromMaybe(false)) return false;
         if (!context->Global()->DefineOwnProperty(context, ns_name, ns, v8::DontEnum).FromMaybe(false))
-            return false;
-    }
-    // Install __mr_realmGlobal(id) on every realm (not gated by host_namespace):
-    // it returns realm `id`'s live globalThis so realms can reach each other
-    // (per-frame realms / iframes). Non-enumerable so it stays out of
-    // Object.keys(globalThis).
-    {
-        auto rg_name = v8::String::NewFromUtf8Literal(st.isolate, "__mr_realmGlobal");
-        auto rg_data = v8::External::New(st.isolate, pst);
-        v8::Local<v8::Function> rg;
-        if (!v8::Function::New(context, v8_realm_global_callback, rg_data).ToLocal(&rg))
-            return false;
-        if (!context->Global()->DefineOwnProperty(context, rg_name, rg, v8::DontEnum).FromMaybe(false))
-            return false;
-        // __mr_realmOf(fn) -> realm id where fn was created (for per-realm error
-        // attribution; the embedder dispatches error events on that realm).
-        auto ro_name = v8::String::NewFromUtf8Literal(st.isolate, "__mr_realmOf");
-        v8::Local<v8::Function> ro;
-        if (!v8::Function::New(context, v8_realm_of_callback).ToLocal(&ro))
-            return false;
-        if (!context->Global()->DefineOwnProperty(context, ro_name, ro, v8::DontEnum).FromMaybe(false))
             return false;
     }
     // Re-attach host functions onto the fresh global. Empty at boot; populated
@@ -2999,6 +3020,10 @@ extern "C" void v8_reset_realm(State *pst)
     cur(st).scripts.clear();
     cur(st).modules.clear();
     cur(st).module_id_by_url.clear();
+    // The realm-0 struct is reused across reset, so its onUnhandledRejection
+    // handler points at a function in the now-discarded old realm. Drop it; the
+    // embedder re-registers on the fresh realm (the namespace is reinstalled).
+    cur(st).unhandled_rejection_handler.Reset();
     // Same rationale as the scripts/modules above: a not-yet-delivered rejection
     // recorded against the old realm would, after the swap, fire against the
     // fresh realm's globalThis (reset reuses the realm id). Drop them.
@@ -3067,6 +3092,7 @@ State::~State()
             Realm& r = *kv.second;
             r.modules.clear();
             r.scripts.clear();
+            r.unhandled_rejection_handler.Reset();
             r.persistent_safe_context_function.Reset();
             r.persistent_safe_context.Reset();
             r.persistent_context.Reset();

@@ -1,3 +1,10 @@
+- 0.21.1.3 - 08-06-2026
+  - **Breaking (realm JS API):** move the per-frame-realm JS helpers off bare `globalThis` globals onto the opt-in host namespace, so globalThis pollution is decided once (by `host_namespace:`) rather than per feature
+    - `__mr_realmGlobal(id)` → `<host_namespace>.realmGlobal(id)`
+    - `__mr_realmOf(fn)` → `<host_namespace>.realmOf(fn)`
+    - the embedder-defined `globalThis.__mr_emitUnhandledRejection` hook → a `<host_namespace>.onUnhandledRejection(fn)` registration method (the engine stores the handler per realm and calls it)
+    - **using these JS helpers now requires `Context.new(host_namespace:)`.** Realms themselves do not: `Context#create_realm` + `Realm#eval`/`call`/`attach` work without it (isolated realms driven from Ruby) — only cross-realm wiring *in JS* needs the namespace, which is why the helpers live there
+
 - 0.21.1.2 - 07-06-2026
   - **Breaking:** move off the `mini_racer` require path / `MiniRacer` namespace to a fork-specific identity so the gem never collides with — and loads deterministically alongside — upstream `mini_racer` in the same bundle
     - require path: `require 'mini_racer_csim'` (was `require 'mini_racer'`); the `require 'mini_racer-csim'` autorequire shim now points here

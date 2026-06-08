@@ -1009,7 +1009,10 @@ class MiniRacerTest < Minitest::Test
     refute(context.eval("Object.keys(globalThis).includes('MiniRacer')"))
     refute(context.eval("Object.getOwnPropertyDescriptor(globalThis, 'MiniRacer').enumerable"))
     # ...but its methods are ordinary own properties, so they are discoverable.
-    assert_equal(%w[drainMicrotasks], context.eval("Object.keys(MiniRacer)"))
+    assert_equal(
+      %w[drainMicrotasks realmGlobal realmOf onUnhandledRejection].sort,
+      context.eval("Object.keys(MiniRacer)").sort
+    )
   end
 
   def test_host_namespace_drain_microtasks_inline
@@ -1213,7 +1216,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_reset_realm_drops_pending_unhandled_rejections
-    context = reset_realm_context
+    context = reset_realm_context(host_namespace: "MiniRacer")
 
     fired = []
     context.attach("record", proc { |reason| fired << reason })
@@ -1228,7 +1231,7 @@ class MiniRacerTest < Minitest::Test
     # fresh realm 0 (whose globalThis is a different object).
     context.reset_realm
 
-    context.eval("globalThis.__mr_emitUnhandledRejection = (reason) => record(String(reason));")
+    context.eval("MiniRacer.onUnhandledRejection((reason) => record(String(reason)));")
     context.perform_microtask_checkpoint
 
     assert_empty(fired, "a pre-reset rejection must not fire in the fresh realm")
@@ -1263,6 +1266,17 @@ class MiniRacerTest < Minitest::Test
     assert_kind_of MiniRacerCsim::Realm, realm
     assert_kind_of Integer, realm.id
     assert_equal 3, realm.eval("1 + 2")
+  end
+
+  def test_realms_work_without_host_namespace
+    # create_realm + Realm#eval/call are namespace-independent: isolated realms
+    # driven from Ruby need no host_namespace. The JS-side cross-realm helpers
+    # (realmGlobal/realmOf) live on the namespace, so they are simply absent when
+    # it is not opted in — using them is what requires host_namespace, not realms.
+    ctx = MiniRacerCsim::Context.new
+    realm = ctx.create_realm
+    assert_equal 5, realm.eval("2 + 3")
+    assert_equal "undefined", realm.eval("typeof MiniRacer")
   end
 
   def test_realm_global_is_isolated_from_the_main_realm
@@ -1313,51 +1327,51 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_global_is_live_and_shared_cross_realm
-    ctx = MiniRacerCsim::Context.new
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     a = ctx.create_realm
     b = ctx.create_realm
     b.eval("globalThis.shared = { n: 42 }")
     a.eval("globalThis.B = #{b.id}")
     # A reads B's global as a live object (not a copy)...
-    assert_equal 42, a.eval("__mr_realmGlobal(B).shared.n")
+    assert_equal 42, a.eval("MiniRacer.realmGlobal(B).shared.n")
     # ...and a mutation from A is visible in B = same underlying object.
-    a.eval("__mr_realmGlobal(B).shared.n = 100")
+    a.eval("MiniRacer.realmGlobal(B).shared.n = 100")
     assert_equal 100, b.eval("globalThis.shared.n")
   end
 
   def test_realm_global_cross_realm_function_call
-    ctx = MiniRacerCsim::Context.new
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     a = ctx.create_realm
     b = ctx.create_realm
     b.eval("globalThis.inc = (x) => x + 1")
     a.eval("globalThis.B = #{b.id}")
-    assert_equal 6, a.eval("__mr_realmGlobal(B).inc(5)")
+    assert_equal 6, a.eval("MiniRacer.realmGlobal(B).inc(5)")
   end
 
   def test_realm_global_reaches_main_realm
-    ctx = MiniRacerCsim::Context.new
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     ctx.eval("globalThis.m = 7")
     a = ctx.create_realm
-    assert_equal 7, a.eval("__mr_realmGlobal(0).m")
+    assert_equal 7, a.eval("MiniRacer.realmGlobal(0).m")
   end
 
   def test_realm_global_unknown_realm_is_undefined
-    ctx = MiniRacerCsim::Context.new
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     a = ctx.create_realm
-    assert_equal "undefined", a.eval("typeof __mr_realmGlobal(99999)")
+    assert_equal "undefined", a.eval("typeof MiniRacer.realmGlobal(99999)")
   end
 
   def test_realm_has_independent_intrinsics
-    ctx = MiniRacerCsim::Context.new
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     a = ctx.create_realm
     b = ctx.create_realm
     a.eval("globalThis.B = #{b.id}")
     # Each realm has its own intrinsics (like an iframe): B's Object is not A's.
-    assert_equal false, a.eval("__mr_realmGlobal(B).Object === Object")
+    assert_equal false, a.eval("MiniRacer.realmGlobal(B).Object === Object")
     # An object built by B is `instanceof` B's Object, but not A's.
     b.eval("globalThis.o = {}")
-    assert_equal true, a.eval("__mr_realmGlobal(B).o instanceof __mr_realmGlobal(B).Object")
-    assert_equal false, a.eval("__mr_realmGlobal(B).o instanceof Object")
+    assert_equal true, a.eval("MiniRacer.realmGlobal(B).o instanceof MiniRacer.realmGlobal(B).Object")
+    assert_equal false, a.eval("MiniRacer.realmGlobal(B).o instanceof Object")
   end
 
   def test_create_realm_is_reentrant_from_a_host_function
@@ -1391,7 +1405,7 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_reentrant_then_outer_cross_realm_access
-    ctx = MiniRacerCsim::Context.new
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     made = nil
     ctx.attach("mk", lambda {
       made = ctx.create_realm
@@ -1399,10 +1413,10 @@ class MiniRacerTest < Minitest::Test
       made.id
     })
     # Full flow: the outer eval creates the frame via a host fn, then reaches
-    # into it with __mr_realmGlobal and writes a property.
+    # into it with MiniRacer.realmGlobal and writes a property.
     result = ctx.eval(<<~JS)
       var id = mk();
-      var g = __mr_realmGlobal(id);
+      var g = MiniRacer.realmGlobal(id);
       g.extra = 9;
       g.tag + ":" + g.extra;
     JS
@@ -1418,7 +1432,7 @@ class MiniRacerTest < Minitest::Test
     [a, b].each do |r|
       r.eval(<<~JS)
         globalThis.caught = [];
-        globalThis.__mr_emitUnhandledRejection = (reason) => { globalThis.caught.push(String(reason)); };
+        MiniRacer.onUnhandledRejection((reason) => { globalThis.caught.push(String(reason)); });
       JS
     end
     b.eval("Promise.reject(new Error('boom'))")
@@ -1433,7 +1447,7 @@ class MiniRacerTest < Minitest::Test
     r = ctx.create_realm
     r.eval(<<~JS)
       globalThis.caught = [];
-      globalThis.__mr_emitUnhandledRejection = (reason) => { globalThis.caught.push(String(reason)); };
+      MiniRacer.onUnhandledRejection((reason) => { globalThis.caught.push(String(reason)); });
       const p = Promise.reject(42);
       p.catch(() => {}); // handler added before the checkpoint
     JS
@@ -1442,28 +1456,28 @@ class MiniRacerTest < Minitest::Test
   end
 
   def test_realm_of_returns_creation_realm
-    ctx = MiniRacerCsim::Context.new
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     a = ctx.create_realm
     b = ctx.create_realm
     a.eval("globalThis.B = #{b.id}")
     b.eval("globalThis.fn = function() {}")
-    assert_equal b.id, a.eval("__mr_realmOf(__mr_realmGlobal(B).fn)")  # cross-realm
-    assert_equal a.id, a.eval("__mr_realmOf(function() {})")
-    assert_equal "undefined", a.eval("typeof __mr_realmOf(42)")        # non-object
+    assert_equal b.id, a.eval("MiniRacer.realmOf(MiniRacer.realmGlobal(B).fn)")  # cross-realm
+    assert_equal a.id, a.eval("MiniRacer.realmOf(function() {})")
+    assert_equal "undefined", a.eval("typeof MiniRacer.realmOf(42)")        # non-object
   end
 
   def test_realm_of_attributes_callback_to_its_creation_realm
-    ctx = MiniRacerCsim::Context.new
+    ctx = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
     f0 = ctx.create_realm
     f1 = ctx.create_realm
     f0.eval("globalThis.F1 = #{f1.id}")
     # A callback built with frame1's Function constructor, scheduled from frame0:
     # WebIDL attributes its uncaught error to the callback's [[Realm]] = frame1
-    # (not the scheduling realm, not the thrown Error's realm). __mr_realmOf
+    # (not the scheduling realm, not the thrown Error's realm). MiniRacer.realmOf
     # reports exactly that, which is what the embedder dispatches the error on.
     assert_equal f1.id, f0.eval(<<~JS)
-      const cb = new (__mr_realmGlobal(F1).Function)("throw new Error('x')");
-      __mr_realmOf(cb);
+      const cb = new (MiniRacer.realmGlobal(F1).Function)("throw new Error('x')");
+      MiniRacer.realmOf(cb);
     JS
   end
 
