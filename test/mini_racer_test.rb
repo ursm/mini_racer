@@ -165,6 +165,18 @@ class MiniRacerTest < Minitest::Test
     assert_kind_of(Hash, result)
   end
 
+  def test_reply_value_non_cloneable_after_filter_returns_error_not_abort
+    context = MiniRacerCsim::Context.new
+    # A Symbol survives the safe-context filter (the filter only drops
+    # functions) but ValueSerializer still cannot clone it. The slow path must
+    # surface that as a clone error, not let its local TryCatch swallow the
+    # exception and return false with nothing pending — which would abort the
+    # caller's `assert(try_catch.HasCaught())`.
+    result = context.eval("({ tag: 1, s: Symbol('x'), fn() {} })")
+    assert_kind_of(Hash, result)
+    assert_match(/could not be cloned/, result["error"].to_s)
+  end
+
   def test_it_handles_malformed_js
     context = MiniRacerCsim::Context.new
     assert_raises MiniRacerCsim::ParseError do

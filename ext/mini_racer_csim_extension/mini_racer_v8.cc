@@ -273,9 +273,26 @@ bool reply(State& st, v8::Local<v8::Value> v)
         return false;
     }
     Serialized serialized(st, v);
-    if (serialized.data)
+    if (serialized.data) {
         v8_reply(st.ruby_context, serialized.data, serialized.size);
-    return serialized.data != nullptr; // exception pending if false
+        return true;
+    }
+    // The filtered value still is not serializable — e.g. it contains a Symbol,
+    // which the filter passes through unchanged (it only drops functions).
+    // ValueSerializer may signal this by returning false WITHOUT throwing, in
+    // which case the bare `return false` below would propagate no exception:
+    // this TryCatch would clear it on destruction and the caller would hit
+    // `assert(try_catch.HasCaught())`. Maintain the invariant that reply()==false
+    // implies a pending, propagated exception — synthesize a clone error when
+    // none was thrown — so the caller returns the {"error": ...} response
+    // instead of aborting. The "could not be cloned" wording matches the
+    // heuristic in the 3-arg reply().
+    if (!try_catch.HasCaught()) {
+        st.isolate->ThrowException(v8::Exception::Error(
+            v8::String::NewFromUtf8Literal(st.isolate, "value could not be cloned")));
+    }
+    try_catch.ReThrow();
+    return false;
 }
 
 bool reply(State& st, v8::Local<v8::Value> result, v8::Local<v8::Value> err)

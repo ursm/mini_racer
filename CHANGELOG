@@ -1,3 +1,6 @@
+- 0.21.1.5 - 08-06-2026
+  - Fix a process abort when a reply value is still not cloneable after the safe-context filter runs (e.g. it contains a `Symbol`, which the filter passes through). The filter slow path returned `false` without re-throwing, so its local `TryCatch` cleared the pending exception and the caller hit `assert(try_catch.HasCaught())`. The clone failure is now propagated and surfaced as the usual `{"error" => "… could not be cloned"}` response. (Latent before 0.21.1.4; the 0.21.1.4 filter memoization made the path reachable for cyclic values.)
+
 - 0.21.1.4 - 08-06-2026
   - Memoize the safe-context reply filter (the recursive deep-copy fallback used when a reply value is not cloneable by V8's ValueSerializer — e.g. it contains a function or a host object). A visited-set (original → filtered copy) makes shared subgraphs clone once instead of being re-walked per reference path (O(N) instead of super-linear), terminates cycles (previously a cyclic value containing a non-cloneable member recursed forever), and preserves object identity — matching the ValueSerializer fast path it backs
 
