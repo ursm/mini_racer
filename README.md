@@ -483,7 +483,9 @@ Without `drain()` the order would be `["before", "after", "microtask"]` because 
 
 When the drain has to happen from within JavaScript itself — for example between each listener in a synchronous `dispatchEvent` chain — the same checkpoint is available to JS as `drainMicrotasks()`. It runs inline on the V8 thread without the Ruby ↔ V8 round-trip, so no `attach` is required.
 
-It is exposed through an opt-in **host namespace** — a single object (in the spirit of Deno's `Deno` or Bun's `Bun`) that mini_racer hangs its non-standard helpers off. Pass `host_namespace:` to enable it; by default nothing is injected and the global stays clean:
+### Host namespace
+
+`mini_racer-csim` exposes its non-standard JS-callable helpers through a single opt-in object (in the spirit of Deno's `Deno` or Bun's `Bun`) rather than as bare globals, so allowing them is a one-time decision and `globalThis` otherwise stays clean. Pass `host_namespace:` to enable it; by default nothing is injected:
 
 ```ruby
 context = MiniRacerCsim::Context.new(host_namespace: "MiniRacer")
@@ -497,6 +499,8 @@ JS
 context.eval("log")
 # => ["before", "microtask", "after"]
 ```
+
+Beyond `drainMicrotasks()`, the namespace also carries the per-frame-realm JS helpers — `realmGlobal(id)`, `realmOf(fn)`, and `onUnhandledRejection(fn)` (see the **Per-frame realms** entry above). They live here for the same reason, so cross-realm wiring *in JS* requires `host_namespace:`; realms driven from Ruby (`Context#create_realm` + `Realm#eval`/`call`) do not.
 
 `host_namespace:` accepts a String (the global name to use — it must be a valid JavaScript identifier), `true` (the default name `"MiniRacer"`), or `nil`/`false` (the default — inject nothing). The namespace object is defined non-enumerable so it does not appear in `Object.keys(globalThis)`, while its methods are ordinary properties discoverable via `Object.keys(MiniRacer)`. Like `perform_microtask_checkpoint`, `drainMicrotasks()` is a no-op while a microtask checkpoint is already in progress, and it lets watchdog/out-of-memory termination propagate to the enclosing `eval`/`call`.
 
