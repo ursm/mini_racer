@@ -163,6 +163,12 @@ typedef struct Context
     // (think ruby->js->ruby->js calls)
     pthread_mutex_t rr_mtx;
     pthread_mutex_t mtx;
+    // Guards |pst| against context_stop, which deliberately does NOT take |mtx|
+    // (the v8 thread holds it while running JS, so stop could never interrupt a
+    // busy loop). The v8 thread NULLs |pst| under |stop_mtx| right before
+    // v8_thread_init frees the State, and context_stop reads + uses |pst| under
+    // it, so stop can never call v8_terminate_execution on a freed State.
+    pthread_mutex_t stop_mtx;
     pthread_cond_t cv;
     struct {
         pthread_mutex_t mtx;
@@ -978,6 +984,13 @@ void v8_thread_main(Context *c, struct State *pst)
         issued_idle_gc = false;
         pthread_cond_signal(&c->cv);
     }
+    // The loop exited because quit was set; v8_thread_init frees the State the
+    // moment we return. NULL pst under stop_mtx first so a concurrent
+    // Context#stop cannot call v8_terminate_execution on the freed State. (We
+    // still hold mtx here; stop never takes mtx, so there is no lock cycle.)
+    pthread_mutex_lock(&c->stop_mtx);
+    c->pst = NULL;
+    pthread_mutex_unlock(&c->stop_mtx);
 }
 
 // called by v8_thread_main and from mini_racer_v8.cc,
@@ -1625,8 +1638,13 @@ static VALUE context_alloc(VALUE klass)
     cause = "barrier_init";
     if ((r = barrier_init(&c->late_init, 2)))
         goto fail7;
+    cause = "pthread_mutex_init";
+    if ((r = pthread_mutex_init(&c->stop_mtx, NULL)))
+        goto fail8;
     pthread_condattr_destroy(&cattr);
     return TypedData_Wrap_Struct(klass, &context_type, c);
+fail8:
+    barrier_destroy(&c->late_init);
 fail7:
     barrier_destroy(&c->early_init);
 fail6:
@@ -1703,6 +1721,7 @@ static void context_destroy(Context *c)
 {
     pthread_mutex_unlock(&c->mtx);
     pthread_mutex_destroy(&c->mtx);
+    pthread_mutex_destroy(&c->stop_mtx);
     pthread_cond_destroy(&c->cv);
     barrier_destroy(&c->early_init);
     barrier_destroy(&c->late_init);
@@ -1801,7 +1820,16 @@ static VALUE context_stop(VALUE self)
     TypedData_Get_Struct(self, Context, &context_type, c);
     if (atomic_load(&c->quit))
         rb_raise(context_disposed_error, "disposed context");
-    v8_terminate_execution(c->pst);
+    // |stop_mtx| (not |mtx|) closes the race with teardown: dispose can set
+    // quit and have the v8 thread free the State between the check above and
+    // here. The v8 thread NULLs pst under this lock right before freeing it, so
+    // under the lock pst is either still valid (terminate it) or already NULL
+    // (the context is going away — nothing to stop). No rb_raise while holding
+    // the lock: a longjmp would leak it.
+    pthread_mutex_lock(&c->stop_mtx);
+    if (c->pst)
+        v8_terminate_execution(c->pst);
+    pthread_mutex_unlock(&c->stop_mtx);
     return Qnil;
 }
 

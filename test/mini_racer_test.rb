@@ -2516,6 +2516,27 @@ class MiniRacerTest < Minitest::Test
     assert_equal(2, ctx.eval("1 + 1"))
   end
 
+  def test_stop_racing_dispose_does_not_crash
+    # context_stop reads c->pst and calls v8_terminate_execution on it; an
+    # explicit dispose frees the State on the v8 thread. Without serialization a
+    # stop landing in the dispose window is a use-after-free. Hammer the window
+    # from another thread: the process must stay alive, and stop after dispose
+    # must raise ContextDisposedError rather than touch freed memory. (Race
+    # test: it cannot deterministically hit the window every run, but it never
+    # fails spuriously and would crash the suite against the unfixed code.)
+    20.times do
+      ctx = MiniRacerCsim::Context.new
+      stopper = Thread.new do
+        loop { ctx.stop }
+      rescue MiniRacerCsim::ContextDisposedError
+        # stop after dispose raises; that's our cue to stop hammering
+      end
+      ctx.dispose
+      stopper.join
+    end
+    pass
+  end
+
   def test_realm_dispose_refused_from_callback
     # A host function whose Ruby body disposes the realm it is suspended in
     # would, without a guard, erase that realm and make the resumed frame's
