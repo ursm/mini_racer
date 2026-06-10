@@ -2570,7 +2570,7 @@ class MiniRacerTest < Minitest::Test
     so = File.expand_path("../../lib/mini_racer_csim_extension.#{RbConfig::CONFIG["DLEXT"]}", __FILE__)
     skip "extension not built at #{so}" unless File.exist?(so)
 
-    exported = `nm -D --defined-only #{so} 2>/dev/null`.lines.filter_map { it.split[2] }
+    exported = `nm -D --defined-only #{so} 2>/dev/null`.lines.filter_map { |line| line.split[2] }
 
     assert_includes exported, "Init_mini_racer_csim_extension",
                     "the entry point must stay exported or Ruby cannot load the extension"
