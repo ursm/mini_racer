@@ -98,7 +98,13 @@ static inline int buf_grow(Buf *b, size_t n)
     n += b->len;
     if (n < b->cap)
         return 0;
-    n = next_power_of_two(n);
+    // Grow geometrically, but next_power_of_two() is uint32_t and wraps to 0
+    // for a required size in (2^31, 2^32] (the rounded-up value 2^32 overflows),
+    // which would realloc a zero/min-size block and let buf_put overrun it. The
+    // guard above already bounds n to UINT32_MAX, so for those sizes allocate
+    // exactly what is needed (cap stays within uint32_t) instead of rounding up.
+    if (n <= (size_t)1 << 31)
+        n = next_power_of_two(n);
     p = NULL;
     if (b->buf != b->buf_s)
         p = b->buf;
