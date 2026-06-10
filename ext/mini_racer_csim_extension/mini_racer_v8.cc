@@ -304,8 +304,18 @@ bool reply(State& st, v8::Local<v8::Value> result, v8::Local<v8::Value> err)
         v8::Context::Scope context_scope(st.safe_context);
         response = v8::Array::New(st.isolate, 2);
     }
-    response->Set(st.context, 0, result).Check();
-    response->Set(st.context, 1, err).Check();
+    // Set() can be preempted by a watchdog/OOM TerminateExecution that lands in
+    // the window between the caller's epilogue clearing termination (its
+    // IsExecutionTerminating check) and here. Under a pending termination Set()
+    // returns Nothing and .Check() would abort the whole process; instead
+    // propagate it as a failed reply so the caller's `goto fail` retry loop
+    // cancels the termination and replies again. Mirrors v8_compile and the
+    // 1-arg reply() above.
+    if (response->Set(st.context, 0, result).IsNothing() ||
+        response->Set(st.context, 1, err).IsNothing()) {
+        try_catch.ReThrow();
+        return false;
+    }
     if (reply(st, response)) return true;
     if (!try_catch.CanContinue()) { // termination exception?
         try_catch.ReThrow();
@@ -330,8 +340,12 @@ bool reply(State& st, v8::Local<v8::Value> result, v8::Local<v8::Value> err)
     if (!v8::String::NewFromUtf8(st.isolate, message).ToLocal(&val)) {
         val = v8::String::NewFromUtf8Literal(st.isolate, "unexpected error");
     }
-    error->Set(st.context, key, val).Check();
-    response->Set(st.context, 0, error).Check();
+    // Same termination hazard as above: don't .Check() these Sets.
+    if (error->Set(st.context, key, val).IsNothing() ||
+        response->Set(st.context, 0, error).IsNothing()) {
+        try_catch.ReThrow();
+        return false;
+    }
     if (!reply(st, response)) {
         try_catch.ReThrow();
         return false;
@@ -581,9 +595,17 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
         }
         v8::Local<v8::String> refs;
         if (!graph_str(st, ref_url, &refs)) refs = v8::String::Empty(st.isolate);
-        pr->Set(context, 0, specifier).Check();
-        pr->Set(context, 1, refs).Check();
-        edges_arr->Set(context, 0, pr).Check();
+        // Under the local tc, a watchdog termination makes Set() return
+        // Nothing. .Check() would abort; but simply returning would let tc clear
+        // the termination on destruction (and reject_pending() would convert it
+        // into a normal import rejection, swallowing it). Rethrow past tc so the
+        // termination propagates to and terminates the enclosing eval.
+        if (pr->Set(context, 0, specifier).IsNothing() ||
+            pr->Set(context, 1, refs).IsNothing() ||
+            edges_arr->Set(context, 0, pr).IsNothing()) {
+            tc.ReThrow();
+            return v8::MaybeLocal<v8::Promise>();
+        }
         v8::Local<v8::Value> resolved_v;
         if (!graph_roundtrip(st, 'r', edges_arr, &resolved_v)) return reject_pending();
         std::string url;
@@ -638,14 +660,17 @@ static v8::MaybeLocal<v8::Promise> host_import_module_dynamically_callback(
             v8::Context::Scope context_scope(st.safe_context);
             request = v8::Array::New(st.isolate, 2);
         }
-        request->Set(context, 0, specifier).Check();
+        // No local TryCatch on this legacy branch, so a watchdog termination
+        // here (Set() -> Nothing) propagates if we return an empty MaybeLocal;
+        // .Check() would abort instead.
+        if (request->Set(context, 0, specifier).IsNothing()) return v8::MaybeLocal<v8::Promise>();
         // resource_name is the referrer's filename for module-initiated imports,
         // or the script filename for eval-initiated ones. May be Undefined for
         // ad-hoc compilations; coerce to empty string in that case.
         v8::Local<v8::Value> ref = resource_name->IsString()
             ? resource_name
             : v8::Local<v8::Value>::Cast(v8::String::Empty(st.isolate));
-        request->Set(context, 1, ref).Check();
+        if (request->Set(context, 1, ref).IsNothing()) return v8::MaybeLocal<v8::Promise>();
 
         {
             Serialized serialized(st, request);
@@ -1015,10 +1040,13 @@ void v8_api_callback(const v8::FunctionCallbackInfo<v8::Value>& info)
         request = v8::Array::New(st.isolate, 1 + info.Length());
     }
     for (int i = 0, n = info.Length(); i < n; i++) {
-        request->Set(st.context, i, sanitize(st, info[i])).Check();
+        // A watchdog/OOM termination during the callback makes Set() return
+        // Nothing; .Check() would abort. Return with the (termination) exception
+        // pending, exactly like the serialization-failure path just below.
+        if (request->Set(st.context, i, sanitize(st, info[i])).IsNothing()) return;
     }
     auto id = v8::Int32::New(st.isolate, cb->id);
-    request->Set(st.context, info.Length(), id).Check(); // callback id
+    if (request->Set(st.context, info.Length(), id).IsNothing()) return; // callback id
     {
         Serialized serialized(st, request);
         if (!serialized.data) return; // exception pending
@@ -1637,7 +1665,10 @@ static v8::MaybeLocal<v8::Module> resolve_module_callback(
     // rather than st.context. In mini_racer's single-context-per-isolate
     // model they're the same handle, but this is defensive in case that
     // ever changes.
-    request->Set(context, 0, specifier).Check();
+    // .Check() would abort if a watchdog termination lands here; propagate the
+    // pending exception instead (same convention as the serialization-failure
+    // return below).
+    if (request->Set(context, 0, specifier).IsNothing()) return v8::MaybeLocal<v8::Module>();
     // Referrer URL — the filename passed to compile_module's filename:
     // kwarg. Lets the Ruby resolver resolve relative specifiers
     // (`./foo`, `../bar`) against the importing module. Falls back to
@@ -1653,7 +1684,7 @@ static v8::MaybeLocal<v8::Module> resolve_module_callback(
     } else {
         referrer_name = v8::String::Empty(st.isolate);
     }
-    request->Set(context, 1, referrer_name).Check();
+    if (request->Set(context, 1, referrer_name).IsNothing()) return v8::MaybeLocal<v8::Module>();
     {
         Serialized serialized(st, request);
         if (!serialized.data) return v8::MaybeLocal<v8::Module>();
@@ -1993,7 +2024,11 @@ static bool walk_module_graph(State& st, const std::string& entry_url,
         for (size_t i = 0; i < to_fetch.size(); i++) {
             v8::Local<v8::String> u;
             if (!graph_str(st, to_fetch[i], &u)) return false;
-            urls_arr->Set(st.context, (uint32_t)i, u).Check();
+            // A watchdog/OOM termination makes Set() return Nothing; .Check()
+            // would abort the process. Propagate as this function's documented
+            // "false with an exception pending" so v8_load_module_graph's fail
+            // epilogue cancels the termination and replies TERMINATED.
+            if (urls_arr->Set(st.context, (uint32_t)i, u).IsNothing()) return false;
         }
         v8::Local<v8::Value> fetched_v;
         if (!graph_roundtrip(st, 'f', urls_arr, &fetched_v)) return false;
@@ -2048,9 +2083,9 @@ static bool walk_module_graph(State& st, const std::string& entry_url,
             v8::Local<v8::String> spec, ref;
             if (!graph_str(st, level_edges[i].first, &spec)) return false;
             if (!graph_str(st, level_edges[i].second, &ref)) return false;
-            pr->Set(st.context, 0, spec).Check();
-            pr->Set(st.context, 1, ref).Check();
-            edges_arr->Set(st.context, (uint32_t)i, pr).Check();
+            if (pr->Set(st.context, 0, spec).IsNothing()) return false;
+            if (pr->Set(st.context, 1, ref).IsNothing()) return false;
+            if (edges_arr->Set(st.context, (uint32_t)i, pr).IsNothing()) return false;
         }
         v8::Local<v8::Value> resolved_v;
         if (!graph_roundtrip(st, 'r', edges_arr, &resolved_v)) return false;
@@ -2162,14 +2197,17 @@ extern "C" void v8_load_module_graph(State *pst, const uint8_t *p, size_t n)
             { v8::Context::Scope cs(st.safe_context); row = v8::Array::New(st.isolate, 2); }
             v8::Local<v8::String> u;
             if (!graph_str(st, new_urls[i], &u)) goto fail;
-            row->Set(st.context, 0, u).Check();
-            row->Set(st.context, 1, v8::Boolean::New(st.isolate, rejected_by_url[new_urls[i]])).Check();
-            mods->Set(st.context, (uint32_t)i, row).Check();
+            // Building the reply runs under the watchdog ('G' -> v8_timedwait);
+            // a termination here makes Set() return Nothing. goto fail (not
+            // .Check()/abort) so the epilogue replies TERMINATED.
+            if (row->Set(st.context, 0, u).IsNothing()) goto fail;
+            if (row->Set(st.context, 1, v8::Boolean::New(st.isolate, rejected_by_url[new_urls[i]])).IsNothing()) goto fail;
+            if (mods->Set(st.context, (uint32_t)i, row).IsNothing()) goto fail;
         }
         v8::Local<v8::Array> out;
         { v8::Context::Scope cs(st.safe_context); out = v8::Array::New(st.isolate, 2); }
-        out->Set(st.context, 0, value).Check();
-        out->Set(st.context, 1, mods).Check();
+        if (out->Set(st.context, 0, value).IsNothing()) goto fail;
+        if (out->Set(st.context, 1, mods).IsNothing()) goto fail;
         result = out;
     }
     cause = NO_ERROR;
