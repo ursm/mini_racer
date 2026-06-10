@@ -380,6 +380,21 @@ void reply_retry(State& st, v8::Local<v8::Value> response)
     }
 }
 
+// Reply a RUNTIME_ERROR refusing a realm op (|op| names the method) invoked
+// while a JS->Ruby callback is suspended on the stack (in_callback > 0).
+// Mutating the realm out from under such a frame corrupts it (reset_realm) or
+// aborts when the resumed frame looks the realm up (dispose_realm).
+static void refuse_in_callback(State& st, const char *op)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%c%s cannot be called from within a host function callback",
+             RUNTIME_ERROR, op);
+    v8::Local<v8::String> err;
+    if (!v8::String::NewFromUtf8(st.isolate, buf).ToLocal(&err))
+        err = v8::String::Empty(st.isolate);
+    reply_retry(st, err);
+}
+
 v8::Local<v8::Value> sanitize(State& st, v8::Local<v8::Value> v)
 {
     // punch through proxies
@@ -2575,11 +2590,18 @@ extern "C" void v8_heap_stats(State *pst)
     v8::HeapStatistics s;
     st.isolate->GetHeapStatistics(&s);
     v8::Local<v8::Object> response = v8::Object::New(st.isolate);
+    // Set() must not .Check(): heap_stats is dispatchable nested from inside a
+    // host callback (ctx.heap_stats from a host function's Ruby body), so the
+    // outer op's watchdog/OOM TerminateExecution can be pending here, making
+    // Set() return Nothing — .Check() would abort the process. On termination
+    // stop populating and reply what we have; reply_retry cancels the
+    // termination to deliver the (possibly partial) stats and re-arms it so the
+    // outer op still terminates.
 #define PROP(name)                                                      \
     do {                                                                \
         auto key = v8::String::NewFromUtf8Literal(st.isolate, #name);   \
         auto val = v8::Number::New(st.isolate, s.name());               \
-        response->Set(st.context, key, val).Check();                    \
+        if (response->Set(st.context, key, val).IsNothing()) goto done; \
     } while (0)
     PROP(total_heap_size);
     PROP(total_heap_size);
@@ -2596,6 +2618,7 @@ extern "C" void v8_heap_stats(State *pst)
     PROP(number_of_native_contexts);
     PROP(number_of_detached_contexts);
 #undef PROP
+done:
     reply_retry(st, response);
 }
 
@@ -2767,6 +2790,10 @@ fail:
         st.isolate->CancelTerminateExecution();
         cause = st.err_reason ? st.err_reason : TERMINATED_ERROR;
         st.err_reason = NO_ERROR;
+        // A watchdog/OOM termination preempting the reply supersedes any earlier
+        // snapshot-failure message; drop it so we report the TERMINATED/MEMORY
+        // error built from |cause| rather than the stale errbuf text.
+        *errbuf = '\0';
     }
     if (!cause && try_catch.HasCaught()) cause = RUNTIME_ERROR;
     if (cause) result = v8::Undefined(st.isolate);
@@ -2839,6 +2866,10 @@ fail:
         st.isolate->CancelTerminateExecution();
         cause = st.err_reason ? st.err_reason : TERMINATED_ERROR;
         st.err_reason = NO_ERROR;
+        // A watchdog/OOM termination preempting the reply supersedes any earlier
+        // snapshot-failure message; drop it so we report the TERMINATED/MEMORY
+        // error built from |cause| rather than the stale errbuf text.
+        *errbuf = '\0';
     }
     if (!cause && try_catch.HasCaught()) cause = RUNTIME_ERROR;
     if (cause) result = v8::Undefined(st.isolate);
@@ -2963,13 +2994,7 @@ extern "C" void v8_dispose_realm(State *pst, const uint8_t *p, size_t n)
     // Same in_callback signal that guards v8_reset_realm. The realm is left
     // intact; realm_dispose surfaces this without marking the realm disposed.
     if (st.in_callback > 0) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "%c%s", RUNTIME_ERROR,
-                 "dispose cannot be called from within a host function callback");
-        v8::Local<v8::String> err;
-        if (!v8::String::NewFromUtf8(st.isolate, buf).ToLocal(&err))
-            err = v8::String::Empty(st.isolate);
-        reply_retry(st, err);
+        refuse_in_callback(st, "dispose");
         return;
     }
 
@@ -3077,13 +3102,7 @@ extern "C" void v8_reset_realm(State *pst)
     // against the swapped realm — corrupting it. (in_callback is the same signal
     // that makes compile() refuse CreateCodeCache mid-callback.)
     if (st.in_callback > 0) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "%c%s", RUNTIME_ERROR,
-                 "reset_realm cannot be called from within a host function callback");
-        v8::Local<v8::String> err;
-        if (!v8::String::NewFromUtf8(st.isolate, buf).ToLocal(&err))
-            err = v8::String::Empty(st.isolate);
-        reply_retry(st, err);
+        refuse_in_callback(st, "reset_realm");
         return;
     }
 

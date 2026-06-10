@@ -165,8 +165,9 @@ typedef struct Context
     pthread_mutex_t mtx;
     // Guards |pst| against context_stop, which deliberately does NOT take |mtx|
     // (the v8 thread holds it while running JS, so stop could never interrupt a
-    // busy loop). The v8 thread NULLs |pst| under |stop_mtx| right before
-    // v8_thread_init frees the State, and context_stop reads + uses |pst| under
+    // busy loop). |pst| is NULLed under |stop_mtx| right before the State is
+    // freed — in v8_thread_main on the threaded path, in context_free_thread_do
+    // on the single_threaded path — and context_stop reads + uses |pst| under
     // it, so stop can never call v8_terminate_execution on a freed State.
     pthread_mutex_t stop_mtx;
     pthread_cond_t cv;
@@ -1677,8 +1678,18 @@ static void *context_free_thread_do(void *arg)
         pthread_mutex_unlock(&c->mtx);
         pthread_join(c->single_threaded_thr, NULL);
     }
-    if (c->pst)
-        v8_single_threaded_dispose(c->pst);
+    if (c->pst) {
+        // NULL pst under stop_mtx before freeing it, same as the threaded path
+        // in v8_thread_main, so a concurrent Context#stop can never terminate a
+        // freed State. (At GC time the object is unreachable so stop can't race,
+        // but this keeps the stop_mtx invariant true in single_threaded mode too
+        // rather than relying on that reachability argument.)
+        struct State *pst = c->pst;
+        pthread_mutex_lock(&c->stop_mtx);
+        c->pst = NULL;
+        pthread_mutex_unlock(&c->stop_mtx);
+        v8_single_threaded_dispose(pst);
+    }
     pthread_mutex_lock(&c->mtx);
     context_destroy(c);
     return NULL;
