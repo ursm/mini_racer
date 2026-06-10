@@ -2515,4 +2515,29 @@ class MiniRacerTest < Minitest::Test
     assert_match(/within a host function callback/, error.message)
     assert_equal(2, ctx.eval("1 + 1"))
   end
+
+  def test_internal_c_abi_symbols_are_not_exported
+    # Regression guard for the LD_PRELOAD ~= malloc load path. The internal
+    # C-ABI shared between mini_racer_csim_extension.c and mini_racer_v8.cc
+    # (v8_dispatch/v8_reply/v8_roundtrip/v8_thread_main/v8_get_flags/
+    # single_threaded/des) has names identical to upstream mini_racer's. If
+    # those reach the dynamic symbol table, dlopen'ing both gems RTLD_GLOBAL
+    # cross-binds them over a divergent Context layout and hangs/corrupts. They
+    # must stay hidden (extconf.rb: -fvisibility=hidden on $CFLAGS), while the
+    # entry point must remain exported or Ruby cannot load the extension.
+    skip "linux + nm only" unless RUBY_PLATFORM.include?("linux") && system("command -v nm > /dev/null 2>&1")
+
+    so = File.expand_path("../../lib/mini_racer_csim_extension.#{RbConfig::CONFIG["DLEXT"]}", __FILE__)
+    skip "extension not built at #{so}" unless File.exist?(so)
+
+    exported = `nm -D --defined-only #{so} 2>/dev/null`.lines.filter_map { it.split[2] }
+
+    assert_includes exported, "Init_mini_racer_csim_extension",
+                    "the entry point must stay exported or Ruby cannot load the extension"
+
+    %w[des single_threaded v8_dispatch v8_get_flags v8_reply v8_roundtrip v8_thread_main].each do |sym|
+      refute_includes exported, sym,
+                      "#{sym} must be hidden so it cannot cross-bind with upstream mini_racer under RTLD_GLOBAL"
+    end
+  end
 end
