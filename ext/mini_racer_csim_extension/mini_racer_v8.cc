@@ -198,6 +198,15 @@ struct State
     // `produce_cache` handling.
     int in_callback;
     std::unique_ptr<v8::ArrayBuffer::Allocator> allocator;
+    // Snapshot descriptor for this isolate. V8 stores params.snapshot_blob by
+    // pointer (Isolate::Initialize keeps it) and re-reads it on every
+    // Context::New — including the post-boot ones from create_realm/reset_realm
+    // — so it must outlive the isolate. Holding it in State (which owns and
+    // disposes the isolate) is required for single_threaded mode, where
+    // v8_thread_init returns while the isolate lives on, destroying any stack
+    // local. The bytes it points at live in the Context's snapshot Buf, which
+    // also outlives the isolate.
+    v8::StartupData snapshot_blob{nullptr, 0};
     inline ~State();
 };
 
@@ -977,13 +986,15 @@ extern "C" State *v8_thread_init(Context *c, const uint8_t *snapshot_buf,
     st.verbose_exceptions = (verbose_exceptions != 0);
     st.ruby_context = c;
     st.allocator.reset(v8::ArrayBuffer::Allocator::NewDefaultAllocator());
-    v8::StartupData blob{nullptr, 0};
     v8::Isolate::CreateParams params;
     params.array_buffer_allocator = st.allocator.get();
     if (snapshot_len) {
-        blob.data = reinterpret_cast<const char*>(snapshot_buf);
-        blob.raw_size = snapshot_len;
-        params.snapshot_blob = &blob;
+        // st.snapshot_blob (not a stack local) so it outlives this frame: in
+        // single_threaded mode v8_thread_init returns while the isolate lives,
+        // and V8 re-reads params.snapshot_blob on every later Context::New.
+        st.snapshot_blob.data = reinterpret_cast<const char*>(snapshot_buf);
+        st.snapshot_blob.raw_size = snapshot_len;
+        params.snapshot_blob = &st.snapshot_blob;
     }
     st.isolate = v8::Isolate::New(params);
     // Slot 0 lets v8 callbacks that don't take embedder data (notably

@@ -222,4 +222,25 @@ class MiniRacerSingleThreadedTest < Minitest::Test
       raise "bad drain order: #{order.inspect}" unless order == %w[before-drain microtask-fired after-drain]
     RUBY
   end
+
+  def test_snapshot_with_realms_does_not_use_freed_startup_data
+    # In single_threaded mode v8_thread_init returns while the isolate lives on,
+    # destroying its stack frame. If params.snapshot_blob pointed at a stack
+    # local, the post-boot Context::New inside create_realm / reset_realm would
+    # dereference freed memory (SEGV, a V8 CHECK, or a silently corrupt realm).
+    # The blob now lives in State, so a snapshotted context can spin up realms.
+    assert_single_threaded_script <<~'RUBY'
+      snapshot = MiniRacerCsim::Snapshot.new("function snap_fn() { return 7 }")
+      ctx = MiniRacerCsim::Context.new(snapshot: snapshot)
+      raise "snapshot not applied" unless ctx.eval("snap_fn()") == 7
+
+      realm = ctx.create_realm
+      raise "bad realm eval" unless realm.eval("1 + 2") == 3
+      raise "snapshot fn missing in realm" unless realm.eval("snap_fn()") == 7
+
+      ctx.reset_realm
+      raise "bad post-reset eval" unless ctx.eval("3 + 4") == 7
+      raise "snapshot fn missing after reset" unless ctx.eval("snap_fn()") == 7
+    RUBY
+  end
 end
