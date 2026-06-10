@@ -2516,6 +2516,25 @@ class MiniRacerTest < Minitest::Test
     assert_equal(2, ctx.eval("1 + 1"))
   end
 
+  def test_realm_dispose_refused_from_callback
+    # A host function whose Ruby body disposes the realm it is suspended in
+    # would, without a guard, erase that realm and make the resumed frame's
+    # cur(st) = st.realms.at(active_realm_id) abort the process under
+    # -fno-exceptions. Refuse it (like reset_realm), leaving the realm usable.
+    ctx = MiniRacerCsim::Context.new
+    realm = ctx.create_realm
+    realm.attach("boom", -> { realm.dispose })
+    error = assert_raises(MiniRacerCsim::RuntimeError) { realm.eval("boom()") }
+    assert_match(/within a host function callback/, error.message)
+    # the realm survived the refusal and is still usable...
+    refute realm.disposed?
+    assert_equal(3, realm.eval("1 + 2"))
+    # ...and disposes cleanly outside a callback.
+    realm.dispose
+    assert realm.disposed?
+    assert_equal(2, ctx.eval("1 + 1"))
+  end
+
   def test_internal_c_abi_symbols_are_not_exported
     # Regression guard for the LD_PRELOAD ~= malloc load path. The internal
     # C-ABI shared between mini_racer_csim_extension.c and mini_racer_v8.cc

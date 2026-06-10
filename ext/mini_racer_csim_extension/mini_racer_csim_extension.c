@@ -2070,6 +2070,7 @@ static VALUE realm_dispose(VALUE self)
     Realm *r;
     Context *c;
     Ser s;
+    VALUE e;
 
     TypedData_Get_Struct(self, Realm, &realm_type, r);
     if (r->disposed)
@@ -2083,7 +2084,15 @@ static VALUE realm_dispose(VALUE self)
     if (!atomic_load(&c->quit)) {
         ser_init1(&s, 'X');    // e(X)punge realm, payload [id]
         ser_int(&s, r->id);
-        rendezvous(c, &s.b);   // reply is an empty string; ignore
+        // Reply is an empty string on success, or a non-empty error string when
+        // the V8 side refused (dispose called from within a host callback): the
+        // realm was NOT expunged and stays usable, so clear disposed before
+        // surfacing. A protocol/context-dispose failure raises from inside
+        // rendezvous, never reaching here, so disposed stays set as above.
+        e = rendezvous(c, &s.b);
+        if (RB_TYPE_P(e, T_STRING) && RSTRING_LEN(e) > 0)
+            r->disposed = 0;
+        handle_exception(e);
     }
     return Qnil;
 }

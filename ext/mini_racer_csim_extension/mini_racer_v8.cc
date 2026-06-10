@@ -2943,6 +2943,25 @@ extern "C" void v8_dispose_realm(State *pst, const uint8_t *p, size_t n)
 {
     State& st = *pst;
     v8::HandleScope handle_scope(st.isolate);
+
+    // Refuse to erase a realm out from under a suspended JS->Ruby callback. A
+    // host function (or dynamic-import / module-resolve callback) whose Ruby
+    // code calls Realm#dispose leaves an outer frame entered in this isolate; if
+    // that frame is running in the disposed realm, the resumed frame's
+    // cur(st) = st.realms.at(active_realm_id) would abort under -fno-exceptions.
+    // Same in_callback signal that guards v8_reset_realm. The realm is left
+    // intact; realm_dispose surfaces this without marking the realm disposed.
+    if (st.in_callback > 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%c%s", RUNTIME_ERROR,
+                 "dispose cannot be called from within a host function callback");
+        v8::Local<v8::String> err;
+        if (!v8::String::NewFromUtf8(st.isolate, buf).ToLocal(&err))
+            err = v8::String::Empty(st.isolate);
+        reply_retry(st, err);
+        return;
+    }
+
     v8::ValueDeserializer des(st.isolate, p, n);
     des.ReadHeader(st.context).Check();
     v8::Local<v8::Value> id_v;
